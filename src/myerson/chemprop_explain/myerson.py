@@ -1,5 +1,4 @@
 import logging
-import networkx as nx
 import numpy as np
 
 try:
@@ -44,7 +43,7 @@ class MyersonExplainer(MyersonCalculator):
 
         self.nx_graph = to_networkx(molgraph)
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
-        cc = nx.number_connected_components(self.nx_graph)
+        cc = self.number_connected_components()
         if cc > 1:
             self.log.warning(f"Your graph has {cc} individual components. The worth"
                         " of the grand coalition and the prediction of a GNN can"
@@ -52,6 +51,31 @@ class MyersonExplainer(MyersonCalculator):
             pred = self.calculate_prediction()
             worth = self.calculate_worth_of_grand_coalition()
             self.log.warning(f"Prediction={pred:.4f}, Worth={worth:.4f}")
+
+    def _forward(self, batch_mol_graph: BatchMolGraph) -> torch.Tensor:
+        """Run the coalition function (MPNN) in eval mode without building an
+        autograd graph. Returns a detached CPU tensor of shape ``(B, tasks)``.
+
+        The model's original ``training`` flag is restored afterwards so calling
+        an explainer does not silently mutate the user's model.
+        """
+        model = self.coalition_function
+        was_training = model.training
+        model.eval()
+        try:
+            batch_mol_graph.to(model.device)
+            with torch.no_grad():
+                return model(batch_mol_graph).detach().cpu()
+        finally:
+            model.train(was_training)
+
+    def _empty_worth(self):
+        """Worth assigned to the empty coalition."""
+        return 0.0
+
+    def _postprocess_worth(self, model_output_row: torch.Tensor) -> float:
+        """Convert a single row of the (batched) model output into a worth."""
+        return model_output_row.item()
 
     def calculate_worth_of_single_graph_restricted_coalition(self,
         graph_restricted_coalition: tuple,
@@ -71,34 +95,113 @@ class MyersonExplainer(MyersonCalculator):
             subgraph. 
         """
         if graph_restricted_coalition == ():
-            return 0.
+            return self._empty_worth()
         subgraph = self.subgraph_from_coalition(graph_restricted_coalition, molgraph)
-        subgraph = BatchMolGraph([subgraph])
-        subgraph.to(self.coalition_function.device)
-        out = self.coalition_function(subgraph)
-        return out.cpu().item()
+        out = self._forward(BatchMolGraph([subgraph]))
+        return self._postprocess_worth(out.squeeze(0))
 
     def calculate_worth_of_graph_restricted_coalitions(self,
-        graph_restricted_coalitions: list) -> dict:
+        graph_restricted_coalitions: list,
+        batch_size: int = 1024) -> dict:
         """Calculate the worth of every graph restricted coalition and map it to
-        its worth. 
+        its worth.
+
+        The non-empty connected components are evaluated in *batches*: many
+        subgraphs are collated into a single ``BatchMolGraph`` and run through
+        the MPNN in one forward pass (under ``torch.no_grad`` + ``eval``). This
+        is dramatically faster than one forward pass per coalition.
 
         Args:
             graph_restricted_coalitions (list): Set of connected components as
                 tuples of node indices.
+            batch_size (int, optional): Maximum number of subgraphs per forward
+                pass. Limits peak memory for graphs with many components.
+                Defaults to 1024.
 
         Returns:
             dict: Dictionary mapping each connected component to its worth.
         """
         self.log.info(f"Calculating worth of graph restricted coalitions.")
         graph_restricted_coalitions_to_worth = {}
-        for coalition in tqdm(graph_restricted_coalitions,
-                            desc="Calculating worth of graph restricted coalitions",
-                            disable=self.disable_tqdm):
-            worth = self.calculate_worth_of_single_graph_restricted_coalition(coalition,
-                                                                            self.molgraph)
-            graph_restricted_coalitions_to_worth.update({coalition: worth})
+
+        # Separate the empty coalition (no forward pass needed).
+        non_empty = []
+        for coalition in graph_restricted_coalitions:
+            if coalition == ():
+                graph_restricted_coalitions_to_worth[()] = self._empty_worth()
+            else:
+                non_empty.append(coalition)
+
+        for start in tqdm(range(0, len(non_empty), batch_size),
+                          desc="Calculating worth of graph restricted coalitions",
+                          disable=self.disable_tqdm):
+            chunk = non_empty[start:start + batch_size]
+            out = self._forward(self._batch_mol_graph_from_coalitions(chunk))
+            for i, coalition in enumerate(chunk):
+                graph_restricted_coalitions_to_worth[coalition] = \
+                    self._postprocess_worth(out[i])
         return graph_restricted_coalitions_to_worth
+
+    def _batch_mol_graph_from_coalitions(self, coalitions: list) -> BatchMolGraph:
+        """Build a :class:`BatchMolGraph` for many connected subgraphs in a
+        single pass directly from the parent ``MolGraph``'s tensors.
+
+        Equivalent to ``BatchMolGraph([subgraph_from_coalition(c) ...])`` but
+        avoids creating one intermediate ``MolGraph`` object per coalition and
+        avoids the second concatenation pass in ``BatchMolGraph.__post_init__``:
+        the batched node/edge offsets are accumulated while masking, then
+        concatenated once.
+
+        TODO: speed up of this optimization is only 1.06x from caffeine to 1.21 naphthalene.
+              Might be better to stick to chemprop API completely
+        """
+        mg = self.molgraph
+        V_all, E_all = mg.V, mg.E
+        edge_index, rev_edge_index = mg.edge_index, mg.rev_edge_index
+        n_atoms = V_all.shape[0]
+        n_edges = edge_index.shape[1]
+        src, dst = edge_index[0], edge_index[1]
+
+        Vs, Es, edge_indexes, rev_edge_indexes, batches = [], [], [], [], []
+        node_offset = 0
+        edge_offset = 0
+        for i, coalition in enumerate(coalitions):
+            nodes = np.sort(np.asarray(coalition, dtype=np.int64))
+            k = nodes.shape[0]
+
+            node_mask = np.zeros(n_atoms, dtype=bool)
+            node_mask[nodes] = True
+            Vs.append(V_all[nodes])
+
+            edge_mask = node_mask[src] & node_mask[dst]
+            n_sub_edges = int(edge_mask.sum())
+
+            # Relabel kept nodes to local 0..k-1, then shift into the batch.
+            node_relabel = np.empty(n_atoms, dtype=np.int64)
+            node_relabel[nodes] = np.arange(k, dtype=np.int64)
+            edge_indexes.append(node_relabel[edge_index[:, edge_mask]] + node_offset)
+            Es.append(E_all[edge_mask])
+
+            # Relabel kept edges to local 0..n_sub_edges-1, then shift.
+            edge_relabel = np.full(n_edges, -1, dtype=np.int64)
+            edge_relabel[edge_mask] = np.arange(n_sub_edges, dtype=np.int64)
+            rev_edge_indexes.append(edge_relabel[rev_edge_index[edge_mask]] + edge_offset)
+
+            batches.append(np.full(k, i, dtype=np.int64))
+            node_offset += k
+            edge_offset += n_sub_edges
+
+        bmg = object.__new__(BatchMolGraph)
+        bmg.V = torch.from_numpy(np.concatenate(Vs)).float()
+        bmg.E = torch.from_numpy(
+            np.concatenate(Es) if Es else np.empty((0, E_all.shape[1]), E_all.dtype)
+        ).float()
+        bmg.edge_index = torch.from_numpy(np.concatenate(edge_indexes, axis=1)).long()
+        bmg.rev_edge_index = torch.from_numpy(np.concatenate(rev_edge_indexes)).long()
+        bmg.batch = torch.from_numpy(np.concatenate(batches)).long()
+        # name-mangled private size field on the slotted dataclass
+        setattr(bmg, "_BatchMolGraph__size", len(coalitions))
+        return bmg
 
     def calculate_worth_of_grand_coalition(self) -> float:
         """Calculate payoff of the game, i.e. the model prediction. Note that a
@@ -127,9 +230,7 @@ class MyersonExplainer(MyersonCalculator):
         Returns:
             float: Prediction.
         """
-        input = BatchMolGraph([self.molgraph])
-        input.to(self.coalition_function.device)
-        return self.coalition_function(input).cpu().item()
+        return self._forward(BatchMolGraph([self.molgraph])).item()
 
     def subgraph_from_coalition(self, graph_restricted_coalition: tuple, 
                                 molgraph: MolGraph) -> MolGraph:
@@ -199,7 +300,7 @@ class MyersonSamplingExplainer(MyersonSampler, MyersonExplainer):
 
         self.nx_graph = to_networkx(molgraph)
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
-        cc = nx.number_connected_components(self.nx_graph)
+        cc = self.number_connected_components()
         if cc > 1:
             self.log.warning(f"Your graph has {cc} individual components. The worth"
                         " of the grand coalition and the prediction of a GNN can"
@@ -221,7 +322,10 @@ class MyersonClassExplainer(MyersonExplainer):
         disable_tqdm (bool, optional): Disables progress bar. Defaults to True.
     """
 
-    def __init__(self, 
+    # Multi-output worths are tensors; use the generic (tensor-capable) path.
+    _supports_subset_dp = False
+
+    def __init__(self,
                 molgraph: MolGraph,
                 coalition_function: MPNN,
                 disable_tqdm: bool=True) -> None:
@@ -230,14 +334,13 @@ class MyersonClassExplainer(MyersonExplainer):
 
         self.disable_tqdm = disable_tqdm
         self.log = logging.getLogger("MyersonClassExplainer")
-
         self.molgraph = molgraph
         self.coalition_function = coalition_function
 
         self.nx_graph = to_networkx(molgraph)
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
         self.pred = self.calculate_prediction()
-        cc = nx.number_connected_components(self.nx_graph)
+        cc = self.number_connected_components()
         if cc > 1:
             self.log.warning(f"Your graph has {cc} individual components. The worth"
                         " of the grand coalition and the prediction of a GNN can"
@@ -246,31 +349,13 @@ class MyersonClassExplainer(MyersonExplainer):
             worth = self.calculate_worth_of_grand_coalition()
             self.log.warning(f"Prediction={pred}, Worth={worth}")
     
-    def calculate_worth_of_single_graph_restricted_coalition(self, 
-        graph_restricted_coalition: tuple,
-        molgraph: MolGraph) -> torch.Tensor:
-        """Calculate the worth of a graph restricted coalition, i. e. a single
-        connected component.
+    def _empty_worth(self) -> torch.Tensor:
+        """Worth assigned to the empty coalition (zero vector over tasks)."""
+        return torch.zeros(self.pred.shape)
 
-        Args:
-            graph_restricted_coalition (tuple): Graph restricted coalition as
-                node indices.
-            molgraph (MolGraph): Graph from which a subgraph
-                of the connected components will be extracted according to the
-                graph restricted coalition.
-
-        Returns:
-            tensor: Worth, the output of the coalition function for the connected
-            subgraph. 
-        """
-        if graph_restricted_coalition == ():
-            return torch.zeros(self.pred.shape)
-        subgraph = self.subgraph_from_coalition(graph_restricted_coalition, molgraph)
-        subgraph = BatchMolGraph([subgraph])
-        subgraph.to(self.coalition_function.device)
-        out = self.coalition_function(subgraph)
-        
-        return out.detach().cpu().squeeze(0)
+    def _postprocess_worth(self, model_output_row: torch.Tensor) -> torch.Tensor:
+        """Keep the full per-task output vector for the (multi-output) classifier."""
+        return model_output_row.clone()
 
     def calculate_prediction(self) -> torch.Tensor:
         """Calculate the prediction of the GNN for the investigated graph. When 
@@ -280,9 +365,7 @@ class MyersonClassExplainer(MyersonExplainer):
         Returns:
             torch.Tensor: Prediction.
         """
-        input = BatchMolGraph([self.molgraph])
-        input.to(self.coalition_function.device)
-        return self.coalition_function(input).cpu().squeeze(0)
+        return self._forward(BatchMolGraph([self.molgraph])).squeeze(0)
 
 
 class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplainer):
@@ -316,7 +399,7 @@ class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplai
         self.nx_graph = to_networkx(molgraph)
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
         self.pred = self.calculate_prediction()
-        cc = nx.number_connected_components(self.nx_graph)
+        cc = self.number_connected_components()
         if cc > 1:
             self.log.warning(f"Your graph has {cc} individual components. The worth"
                         " of the grand coalition and the prediction of a GNN can"
@@ -357,24 +440,21 @@ class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplai
             np.ndarray: Sampled Myerson values.
         """
         self.sample_all_mappings()
-        pred = self.calculate_prediction()
-        nodes_array = np.array(self.grand_coalition)
-        my_values = np.zeros((len(nodes_array), pred.shape[0]), dtype=float)
         self.log.info(f"Calculating sampled Myerson values.")
-        for permutation in tqdm(self.permutations_without_random_node,
-                              disable=self.disable_tqdm,
-                              desc="Calculate sampled Myerson values"):
-            for node_idx, node in enumerate(nodes_array):
+        # Per-task worth vectors keyed by integer bitmask (see base class).
+        worth = {mask: np.asarray(t).squeeze() for mask, t in self._worth_by_mask.items()}
+        node_bits = self._node_bits
+        random_node_bit = self._random_node_bit
+        n = len(node_bits)
+        n_tasks = self.pred.shape[0]
 
-                sampled_permutation_with_current_swapped_in_random_node = permutation.copy()
-                sampled_permutation_with_current_swapped_in_random_node \
-                    = self._replace_in_array(sampled_permutation_with_current_swapped_in_random_node,
-                                             node,
-                                             self.random_node)
-
-                worth_with_node = self.coalitions_to_worth[tuple(np.sort(np.append(sampled_permutation_with_current_swapped_in_random_node, node)))]
-                worth_without_node = self.coalitions_to_worth[tuple(np.sort(sampled_permutation_with_current_swapped_in_random_node))]
-                my_values[node_idx] = (my_values[node_idx] + worth_with_node.numpy().squeeze() - worth_without_node.numpy().squeeze())
+        my_values = np.zeros((n, n_tasks), dtype=float)
+        for mask in tqdm(self._base_masks, disable=self.disable_tqdm,
+                         desc="Calculate sampled Myerson values"):
+            for j in range(n):
+                bit = node_bits[j]
+                without = ((mask ^ bit) | random_node_bit) if (mask & bit) else mask
+                my_values[j] += worth[without | bit] - worth[without]
 
         my_values = my_values / self.number_of_samples
         log_string = "".join([f"\t{node}: {val}\n" for node, val in zip(self.grand_coalition, my_values)])

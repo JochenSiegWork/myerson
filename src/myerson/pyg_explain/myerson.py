@@ -7,10 +7,9 @@ except ImportError:
     raise ImportError("Failed to import torch and/or torch_geometric. PyG explanations not available.")
 import numpy as np
 
-import networkx as nx
 from tqdm import tqdm
 import logging
-# try: 
+# try:
 #     from .myerson import fast_restrict
 # except:
 #     pass
@@ -46,7 +45,7 @@ class MyersonExplainer(MyersonCalculator):
 
         self.nx_graph = torch_geometric.utils.to_networkx(graph, to_undirected=True)
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
-        cc = nx.number_connected_components(self.nx_graph)
+        cc = self.number_connected_components()
         if cc > 1:
             self.log.warning(f"Your graph has {cc} individual components. The worth"
                         " of the grand coalition and the prediction of a GNN can"
@@ -270,7 +269,7 @@ class MyersonSamplingExplainer(MyersonSampler, MyersonExplainer):
 
         self.nx_graph = torch_geometric.utils.to_networkx(graph, to_undirected=True)
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
-        cc = nx.number_connected_components(self.nx_graph)
+        cc = self.number_connected_components()
         if cc > 1:
             self.log.warning(f"Your graph has {cc} individual components. The worth"
                         " of the grand coalition and the prediction of a GNN can"
@@ -297,7 +296,10 @@ class MyersonClassExplainer(MyersonExplainer):
         disable_tqdm (bool, optional): Disables progress bar. Defaults to True.
     """
 
-    def __init__(self, 
+    # Multi-output worths are tensors; use the generic (tensor-capable) path.
+    _supports_subset_dp = False
+
+    def __init__(self,
                 graph: torch_geometric.data.Data,
                 coalition_function: torch.nn.Module,
                 disable_tqdm: bool=True) -> None:
@@ -316,7 +318,7 @@ class MyersonClassExplainer(MyersonExplainer):
         self.nx_graph = torch_geometric.utils.to_networkx(graph, to_undirected=True)
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
         self.pred = self.calculate_prediction()
-        cc = nx.number_connected_components(self.nx_graph)
+        cc = self.number_connected_components()
         if cc > 1:
             self.log.warning(f"Your graph has {cc} individual components. The worth"
                         " of the grand coalition and the prediction of a GNN can"
@@ -395,7 +397,7 @@ class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplai
         self.nx_graph = torch_geometric.utils.to_networkx(graph, to_undirected=True)
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
         self.pred = self.calculate_prediction()
-        cc = nx.number_connected_components(self.nx_graph)
+        cc = self.number_connected_components()
         if cc > 1:
             self.log.warning(f"Your graph has {cc} individual components. The worth"
                         " of the grand coalition and the prediction of a GNN can"
@@ -436,24 +438,21 @@ class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplai
             np.ndarray: Sampled Myerson values.
         """
         self.sample_all_mappings()
-        pred = self.calculate_prediction()
-        nodes_array = np.array(self.grand_coalition)
-        my_values = np.zeros((len(nodes_array), pred.shape[0]), dtype=float)
         self.log.info(f"Calculating sampled Myerson values.")
-        for permutation in tqdm(self.permutations_without_random_node,
-                              disable=self.disable_tqdm,
-                              desc="Calculate sampled Myerson values"):
-            for node_idx, node in enumerate(nodes_array):
+        # Per-task worth vectors keyed by integer bitmask (see base class).
+        worth = {mask: np.asarray(t).squeeze() for mask, t in self._worth_by_mask.items()}
+        node_bits = self._node_bits
+        random_node_bit = self._random_node_bit
+        n = len(node_bits)
+        n_tasks = self.pred.shape[0]
 
-                sampled_permutation_with_current_swapped_in_random_node = permutation.copy()
-                sampled_permutation_with_current_swapped_in_random_node \
-                    = self._replace_in_array(sampled_permutation_with_current_swapped_in_random_node,
-                                             node,
-                                             self.random_node)
-
-                worth_with_node = self.coalitions_to_worth[tuple(np.sort(np.append(sampled_permutation_with_current_swapped_in_random_node, node)))]
-                worth_without_node = self.coalitions_to_worth[tuple(np.sort(sampled_permutation_with_current_swapped_in_random_node))]
-                my_values[node_idx] = (my_values[node_idx] + worth_with_node.numpy().squeeze() - worth_without_node.numpy().squeeze())
+        my_values = np.zeros((n, n_tasks), dtype=float)
+        for mask in tqdm(self._base_masks, disable=self.disable_tqdm,
+                         desc="Calculate sampled Myerson values"):
+            for j in range(n):
+                bit = node_bits[j]
+                without = ((mask ^ bit) | random_node_bit) if (mask & bit) else mask
+                my_values[j] += worth[without | bit] - worth[without]
 
         my_values = my_values / self.number_of_samples
         log_string = "".join([f"\t{node}: {val}\n" for node, val in zip(self.grand_coalition, my_values)])
