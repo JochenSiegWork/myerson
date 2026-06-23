@@ -15,7 +15,6 @@ from chemprop.data.collate import BatchMolGraph
 from myerson import MyersonCalculator, MyersonSampler
 from myerson.chemprop_explain.utils import to_networkx
 
-
 class MyersonExplainer(MyersonCalculator):
     r"""Explains the prediction of a chemprop MPNN with Myerson values.
         The MPNN is treated as the coalition function of a game and its prediction
@@ -64,7 +63,7 @@ class MyersonExplainer(MyersonCalculator):
         model.eval()
         try:
             batch_mol_graph.to(model.device)
-            with torch.no_grad():
+            with torch.inference_mode():
                 return model(batch_mol_graph).detach().cpu()
         finally:
             model.train(was_training)
@@ -102,21 +101,28 @@ class MyersonExplainer(MyersonCalculator):
 
     def calculate_worth_of_graph_restricted_coalitions(self,
         graph_restricted_coalitions: list,
-        batch_size: int = 1024) -> dict:
+        batch_size: int = 4096,
+        max_atoms_per_forward: int | None = None) -> dict:
         """Calculate the worth of every graph restricted coalition and map it to
         its worth.
 
         The non-empty connected components are evaluated in *batches*: many
         subgraphs are collated into a single ``BatchMolGraph`` and run through
-        the MPNN in one forward pass (under ``torch.no_grad`` + ``eval``). This
-        is dramatically faster than one forward pass per coalition.
+        the MPNN in one forward pass (under ``torch.inference_mode`` + ``eval``).
+        This is dramatically faster than one forward pass per coalition.
 
         Args:
             graph_restricted_coalitions (list): Set of connected components as
                 tuples of node indices.
             batch_size (int, optional): Maximum number of subgraphs per forward
-                pass. Limits peak memory for graphs with many components.
-                Defaults to 1024.
+                pass. On GPU, throughput rises with batch size up to ~4096 (then
+                plateaus); on CPU it is essentially flat past a few hundred. The
+                subgraphs are small (≤ molecule size), so 4096 is well within
+                memory. Defaults to 4096.
+            max_atoms_per_forward (int | None, optional): If given, chunk by the
+                total number of subgraph atoms rather than only by number of
+                subgraphs. This gives tighter GPU-memory control for exact
+                explanations where connected subgraph sizes vary widely.
 
         Returns:
             dict: Dictionary mapping each connected component to its worth.
@@ -132,10 +138,26 @@ class MyersonExplainer(MyersonCalculator):
             else:
                 non_empty.append(coalition)
 
-        for start in tqdm(range(0, len(non_empty), batch_size),
+        if max_atoms_per_forward is None:
+            chunks = [non_empty[start:start + batch_size]
+                      for start in range(0, len(non_empty), batch_size)]
+        else:
+            chunks = []
+            chunk, atoms = [], 0
+            for coalition in non_empty:
+                n_atoms = len(coalition)
+                if chunk and (len(chunk) >= batch_size
+                              or atoms + n_atoms > max_atoms_per_forward):
+                    chunks.append(chunk)
+                    chunk, atoms = [], 0
+                chunk.append(coalition)
+                atoms += n_atoms
+            if chunk:
+                chunks.append(chunk)
+
+        for chunk in tqdm(chunks,
                           desc="Calculating worth of graph restricted coalitions",
                           disable=self.disable_tqdm):
-            chunk = non_empty[start:start + batch_size]
             out = self._forward(self._batch_mol_graph_from_coalitions(chunk))
             for i, coalition in enumerate(chunk):
                 graph_restricted_coalitions_to_worth[coalition] = \
@@ -144,16 +166,13 @@ class MyersonExplainer(MyersonCalculator):
 
     def _batch_mol_graph_from_coalitions(self, coalitions: list) -> BatchMolGraph:
         """Build a :class:`BatchMolGraph` for many connected subgraphs in a
-        single pass directly from the parent ``MolGraph``'s tensors.
+        single *fully vectorised* pass directly from the parent ``MolGraph``.
 
         Equivalent to ``BatchMolGraph([subgraph_from_coalition(c) ...])`` but
-        avoids creating one intermediate ``MolGraph`` object per coalition and
-        avoids the second concatenation pass in ``BatchMolGraph.__post_init__``:
-        the batched node/edge offsets are accumulated while masking, then
-        concatenated once.
-
-        TODO: speed up of this optimization is only 1.06x from caffeine to 1.21 naphthalene.
-              Might be better to stick to chemprop API completely
+        with no per-coalition Python iteration over the parent graph: a
+        ``(B, n_atoms)`` membership matrix drives all node/edge selection,
+        relabelling and reversal via ``np.nonzero`` + fancy indexing (``B`` is
+        the chunk-bounded number of coalitions).
         """
         mg = self.molgraph
         V_all, E_all = mg.V, mg.E
@@ -161,51 +180,50 @@ class MyersonExplainer(MyersonCalculator):
         n_atoms = V_all.shape[0]
         n_edges = edge_index.shape[1]
         src, dst = edge_index[0], edge_index[1]
+        n_batch = len(coalitions)
 
-        Vs, Es, edge_indexes, rev_edge_indexes, batches = [], [], [], [], []
-        node_offset = 0
-        edge_offset = 0
-        for i, coalition in enumerate(coalitions):
-            nodes = np.sort(np.asarray(coalition, dtype=np.int64))
-            k = nodes.shape[0]
+        # --- Node membership matrix (B x n_atoms), built with one scatter. ---
+        lengths = np.fromiter((len(c) for c in coalitions), dtype=np.int64,
+                              count=n_batch)
+        node_batch_in = np.repeat(np.arange(n_batch, dtype=np.int64), lengths)
+        all_nodes_in = np.concatenate([np.asarray(c, dtype=np.int64)
+                                       for c in coalitions])
+        member = np.zeros((n_batch, n_atoms), dtype=bool)
+        member[node_batch_in, all_nodes_in] = True
 
-            node_mask = np.zeros(n_atoms, dtype=bool)
-            node_mask[nodes] = True
-            Vs.append(V_all[nodes])
+        # Batched nodes in (batch, node) ascending order == per-batch sorted
+        # blocks; each row's position is its new global node id.
+        node_batch, node_old = np.nonzero(member)
+        n_nodes_total = node_old.shape[0]
+        node_new_id = np.empty((n_batch, n_atoms), dtype=np.int64)
+        node_new_id[node_batch, node_old] = np.arange(n_nodes_total, dtype=np.int64)
 
-            edge_mask = node_mask[src] & node_mask[dst]
-            n_sub_edges = int(edge_mask.sum())
+        # --- Edges kept iff both endpoints are in the coalition. ---
+        edge_member = member[:, src] & member[:, dst]
+        edge_batch, edge_old = np.nonzero(edge_member)
+        n_edges_total = edge_old.shape[0]
+        edge_new_id = np.empty((n_batch, n_edges), dtype=np.int64)
+        edge_new_id[edge_batch, edge_old] = np.arange(n_edges_total, dtype=np.int64)
 
-            # Relabel kept nodes to local 0..k-1, then shift into the batch.
-            node_relabel = np.empty(n_atoms, dtype=np.int64)
-            node_relabel[nodes] = np.arange(k, dtype=np.int64)
-            edge_indexes.append(node_relabel[edge_index[:, edge_mask]] + node_offset)
-            Es.append(E_all[edge_mask])
-
-            # Relabel kept edges to local 0..n_sub_edges-1, then shift.
-            edge_relabel = np.full(n_edges, -1, dtype=np.int64)
-            edge_relabel[edge_mask] = np.arange(n_sub_edges, dtype=np.int64)
-            rev_edge_indexes.append(edge_relabel[rev_edge_index[edge_mask]] + edge_offset)
-
-            batches.append(np.full(k, i, dtype=np.int64))
-            node_offset += k
-            edge_offset += n_sub_edges
+        new_src = node_new_id[edge_batch, src[edge_old]]
+        new_dst = node_new_id[edge_batch, dst[edge_old]]
+        batched_edge_index = np.stack([new_src, new_dst])
+        # the reverse of a kept edge is also kept (same endpoints) -> always valid
+        batched_rev = edge_new_id[edge_batch, rev_edge_index[edge_old]]
 
         bmg = object.__new__(BatchMolGraph)
-        bmg.V = torch.from_numpy(np.concatenate(Vs)).float()
-        bmg.E = torch.from_numpy(
-            np.concatenate(Es) if Es else np.empty((0, E_all.shape[1]), E_all.dtype)
-        ).float()
-        bmg.edge_index = torch.from_numpy(np.concatenate(edge_indexes, axis=1)).long()
-        bmg.rev_edge_index = torch.from_numpy(np.concatenate(rev_edge_indexes)).long()
-        bmg.batch = torch.from_numpy(np.concatenate(batches)).long()
+        bmg.V = torch.from_numpy(np.ascontiguousarray(V_all[node_old])).float()
+        bmg.E = torch.from_numpy(np.ascontiguousarray(E_all[edge_old])).float()
+        bmg.edge_index = torch.from_numpy(batched_edge_index).long()
+        bmg.rev_edge_index = torch.from_numpy(batched_rev).long()
+        bmg.batch = torch.from_numpy(node_batch).long()
         # name-mangled private size field on the slotted dataclass
-        setattr(bmg, "_BatchMolGraph__size", len(coalitions))
+        setattr(bmg, "_BatchMolGraph__size", n_batch)
         return bmg
 
     def calculate_worth_of_grand_coalition(self) -> float:
         """Calculate payoff of the game, i.e. the model prediction. Note that a
-        disconnected graph (> 2 molecules) can lead to differeces between 
+        disconnected graph (> 2 molecules) can lead to differences between
         the model prediction and this function. 
 
         Args:
@@ -232,7 +250,7 @@ class MyersonExplainer(MyersonCalculator):
         """
         return self._forward(BatchMolGraph([self.molgraph])).item()
 
-    def subgraph_from_coalition(self, graph_restricted_coalition: tuple, 
+    def subgraph_from_coalition(self, graph_restricted_coalition: tuple,
                                 molgraph: MolGraph) -> MolGraph:
         """Generates a subgraph from a graph restricted coalition (a subset of
         nodes / players) and a graph.
@@ -263,7 +281,6 @@ class MyersonExplainer(MyersonCalculator):
 
         edge_idx_map = np.full(molgraph.edge_index.shape[1], -1, dtype=np.int32)
         edge_idx_map[edge_mask] = np.arange(edge_mask.sum())
-        edge_idx_map
         rev_edge_index_masked = molgraph.rev_edge_index[edge_mask]
         rev_edge_index = edge_idx_map[rev_edge_index_masked]
 
@@ -321,9 +338,6 @@ class MyersonClassExplainer(MyersonExplainer):
         coalition_function (MPNN): The message passing neural network.
         disable_tqdm (bool, optional): Disables progress bar. Defaults to True.
     """
-
-    # Multi-output worths are tensors; use the generic (tensor-capable) path.
-    _supports_subset_dp = False
 
     def __init__(self,
                 molgraph: MolGraph,
@@ -440,6 +454,18 @@ class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplai
             np.ndarray: Sampled Myerson values.
         """
         self.sample_all_mappings()
+        return self._sampled_myerson_values_from_prepared()
+
+    def _sampled_myerson_values_from_prepared(self) -> np.ndarray:
+        """Tensor (multi-output) counterpart of the base scalar value loop, run
+        on the already-prepared bitmask worth table (``self._worth_by_mask`` etc.).
+
+        Overrides :meth:`MyersonSampler._sampled_myerson_values_from_prepared`
+        so the per-task worth *vectors* are accumulated instead of scalars. Kept
+        separate from :meth:`sample_all_myerson_values` so a cross-molecule
+        batched pipeline can fill the worth table externally and then call this
+        (see :func:`explain_batch` with ``classification=True``).
+        """
         self.log.info(f"Calculating sampled Myerson values.")
         # Per-task worth vectors keyed by integer bitmask (see base class).
         worth = {mask: np.asarray(t).squeeze() for mask, t in self._worth_by_mask.items()}
@@ -455,6 +481,7 @@ class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplai
                 bit = node_bits[j]
                 without = ((mask ^ bit) | random_node_bit) if (mask & bit) else mask
                 my_values[j] += worth[without | bit] - worth[without]
+
 
         my_values = my_values / self.number_of_samples
         log_string = "".join([f"\t{node}: {val}\n" for node, val in zip(self.grand_coalition, my_values)])

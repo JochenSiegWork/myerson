@@ -75,6 +75,30 @@ class MyersonExplainer(MyersonCalculator):
     #         self.log.info("Using python only slow `restrict()` (networkx package).")
     #         self.restrict = super().restrict
 
+    def _forward(self, x: torch.Tensor, edge_index: torch.Tensor,
+                 batch: torch.Tensor) -> torch.Tensor:
+        """Run the GNN in eval mode without building an autograd graph.
+
+        Returns a detached CPU tensor of shape ``(B, tasks)`` (one row per graph
+        in the ``batch`` vector). The model's ``training`` flag is restored.
+        """
+        model = self.coalition_function
+        was_training = model.training
+        model.eval()
+        try:
+            with torch.inference_mode():
+                return model(x, edge_index, batch).detach().cpu()
+        finally:
+            model.train(was_training)
+
+    def _empty_worth(self):
+        """Worth assigned to the empty coalition."""
+        return 0.
+
+    def _postprocess_worth(self, model_output_row: torch.Tensor) -> float:
+        """Convert a single row of the (batched) model output into a worth."""
+        return model_output_row.item()
+
     def calculate_worth_of_single_graph_restricted_coalition(self,
         graph_restricted_coalition: tuple,
         pyg_graph: torch_geometric.data.Data) -> float:
@@ -93,33 +117,98 @@ class MyersonExplainer(MyersonCalculator):
             subgraph. 
         """
         if graph_restricted_coalition == ():
-            return 0.
+            return self._empty_worth()
         subgraph = self.subgraph_from_coalition(graph_restricted_coalition, pyg_graph)
-        out = self.coalition_function(subgraph.x, subgraph.edge_index, self._batch_var(subgraph))
-        
-        return out.cpu().item()
+        out = self._forward(subgraph.x, subgraph.edge_index, self._batch_var(subgraph))
+        return self._postprocess_worth(out.squeeze(0))
 
     def calculate_worth_of_graph_restricted_coalitions(self,
-        graph_restricted_coalitions: list) -> dict:
+        graph_restricted_coalitions: list,
+        batch_size: int = 4096) -> dict:
         """Calculate the worth of every graph restricted coalition and map it to
-        its worth. 
+        its worth.
+
+        The non-empty connected components are evaluated in *batches*: many
+        subgraphs are collated into a single disjoint-union PyG graph (one
+        ``batch`` vector entry per subgraph) and run through the GNN in one
+        forward pass (under ``torch.inference_mode`` + ``eval``). This is
+        dramatically faster than one forward pass per coalition.
 
         Args:
-            graph_restricted_coalitions (list): Set of connected components as
-                tuples of node indices.
+            graph_restricted_coalitions (list): Connected components as tuples of
+                node indices.
+            batch_size (int, optional): Maximum number of subgraphs per forward
+                pass. On GPU throughput rises with batch size up to a few
+                thousand; subgraphs are small so 4096 is well within memory.
+                Defaults to 4096.
 
         Returns:
             dict: Dictionary mapping each connected component to its worth.
         """
         self.log.info(f"Calculating worth of graph restricted coalitions.")
         graph_restricted_coalitions_to_worth = {}
-        for coalition in tqdm(graph_restricted_coalitions,
-                            desc="Calculating worth of graph restricted coalitions",
-                            disable=self.disable_tqdm):
-            worth = self.calculate_worth_of_single_graph_restricted_coalition(coalition,
-                                                                            self.pyg_graph)
-            graph_restricted_coalitions_to_worth.update({coalition: worth})
+
+        non_empty = []
+        for coalition in graph_restricted_coalitions:
+            if coalition == ():
+                graph_restricted_coalitions_to_worth[()] = self._empty_worth()
+            else:
+                non_empty.append(coalition)
+
+        for start in tqdm(range(0, len(non_empty), batch_size),
+                          desc="Calculating worth of graph restricted coalitions",
+                          disable=self.disable_tqdm):
+            chunk = non_empty[start:start + batch_size]
+            x, edge_index, batch = self._batch_data_from_coalitions(chunk)
+            out = self._forward(x, edge_index, batch)
+            for i, coalition in enumerate(chunk):
+                graph_restricted_coalitions_to_worth[coalition] = \
+                    self._postprocess_worth(out[i])
         return graph_restricted_coalitions_to_worth
+
+    def _batch_data_from_coalitions(self, coalitions: list):
+        """Build one disjoint-union graph for many connected subgraphs in a
+        single vectorised pass directly from the parent ``pyg_graph``.
+
+        Returns ``(x, edge_index, batch)`` for ``model(x, edge_index, batch)``,
+        equivalent to collating ``subgraph_from_coalition(c)`` for every ``c``
+        but with no per-coalition Python iteration over the parent graph: a
+        ``(B, n_atoms)`` membership matrix drives all node/edge selection and
+        relabelling via ``nonzero`` + fancy indexing.
+        """
+        pg = self.pyg_graph
+        device = pg.x.device
+        x_all = pg.x
+        edge_index = pg.edge_index
+        n_atoms = x_all.shape[0]
+        src, dst = edge_index[0], edge_index[1]
+        n_batch = len(coalitions)
+
+        # Node membership matrix (B x n_atoms), built with one scatter.
+        lengths = torch.tensor([len(c) for c in coalitions], device=device)
+        node_batch_in = torch.repeat_interleave(
+            torch.arange(n_batch, device=device), lengths)
+        all_nodes_in = torch.tensor(
+            [node for c in coalitions for node in c],
+            dtype=torch.long, device=device)
+        member = torch.zeros((n_batch, n_atoms), dtype=torch.bool, device=device)
+        member[node_batch_in, all_nodes_in] = True
+
+        # nonzero is row-major -> per-batch ascending node order (== sorted).
+        node_batch, node_old = member.nonzero(as_tuple=True)
+        n_nodes_total = node_old.shape[0]
+        node_new_id = torch.empty((n_batch, n_atoms), dtype=torch.long, device=device)
+        node_new_id[node_batch, node_old] = torch.arange(n_nodes_total, device=device)
+
+        # Edges kept iff both endpoints are in the coalition.
+        edge_member = member[:, src] & member[:, dst]
+        edge_batch, edge_old = edge_member.nonzero(as_tuple=True)
+        new_src = node_new_id[edge_batch, src[edge_old]]
+        new_dst = node_new_id[edge_batch, dst[edge_old]]
+        batched_edge_index = torch.stack([new_src, new_dst])
+
+        x = x_all[node_old]
+        return x, batched_edge_index, node_batch
 
     def calculate_worth_of_grand_coalition(self) -> float:
         """Calculate payoff of the game, i.e. the model prediction. Note that a
@@ -148,8 +237,8 @@ class MyersonExplainer(MyersonCalculator):
         Returns:
             float: Prediction.
         """
-        return self.coalition_function(self.pyg_graph.x, self.pyg_graph.edge_index,
-                                    self._batch_var(self.pyg_graph)).cpu().item()
+        return self._forward(self.pyg_graph.x, self.pyg_graph.edge_index,
+                             self._batch_var(self.pyg_graph)).item()
     def _batch_var(self, pyg_graph: torch_geometric.data.Data) -> torch.tensor:
         """Return a batch argument for single graphs, required for models 
         trained in batches.
@@ -296,8 +385,6 @@ class MyersonClassExplainer(MyersonExplainer):
         disable_tqdm (bool, optional): Disables progress bar. Defaults to True.
     """
 
-    # Multi-output worths are tensors; use the generic (tensor-capable) path.
-    _supports_subset_dp = False
 
     def __init__(self,
                 graph: torch_geometric.data.Data,
@@ -345,11 +432,18 @@ class MyersonClassExplainer(MyersonExplainer):
             subgraph. 
         """
         if graph_restricted_coalition == ():
-            return torch.zeros(self.pred.shape)
+            return self._empty_worth()
         subgraph = self.subgraph_from_coalition(graph_restricted_coalition, pyg_graph)
-        out = self.coalition_function(subgraph.x, subgraph.edge_index, self._batch_var(subgraph))
-        
-        return out.detach().cpu().squeeze(0)
+        out = self._forward(subgraph.x, subgraph.edge_index, self._batch_var(subgraph))
+        return self._postprocess_worth(out.squeeze(0))
+
+    def _empty_worth(self) -> torch.Tensor:
+        """Worth assigned to the empty coalition (zero vector over tasks)."""
+        return torch.zeros(self.pred.shape)
+
+    def _postprocess_worth(self, model_output_row: torch.Tensor) -> torch.Tensor:
+        """Keep the full per-task output vector for the (multi-output) classifier."""
+        return model_output_row.clone()
 
     def calculate_prediction(self) -> torch.tensor:
         """Calculate the prediction of the GNN for the investigated graph. When 
@@ -359,8 +453,8 @@ class MyersonClassExplainer(MyersonExplainer):
         Returns:
             float: Prediction.
         """
-        return self.coalition_function(self.pyg_graph.x, self.pyg_graph.edge_index,
-                                    self._batch_var(self.pyg_graph)).cpu().squeeze(0)
+        return self._forward(self.pyg_graph.x, self.pyg_graph.edge_index,
+                             self._batch_var(self.pyg_graph)).squeeze(0)
 
 
 class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplainer):
