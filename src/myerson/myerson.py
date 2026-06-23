@@ -325,6 +325,88 @@ class MyersonCalculator():
         else:
             return nx_graph.subgraph(graph_restricted_coalition)
 
+    def connected_subgraph_count_lower_bound(
+            self,
+            nx_graph: nx.classes.graph.Graph | None = None,
+            stop_above: int | None = None) -> int:
+        """Lower-bound the number of connected induced subgraphs cheaply.
+
+        The count is computed exactly on a spanning forest of ``nx_graph``. Every
+        connected induced subgraph of that forest is also connected in the
+        original graph, so this is a safe lower bound for the exact enumeration
+        cost. For trees / forests (common molecule backbones without rings) the
+        lower bound is the exact count. If ``stop_above`` is given, intermediate
+        values are capped and the method returns as soon as the lower bound is
+        known to exceed that threshold.
+
+        This is useful as a preflight for budgeted exact explanation: if even a
+        spanning forest has more connected subgraphs than the budget, the full
+        graph certainly does too, so callers can switch to sampling without
+        starting the connected-subgraph enumerator.
+
+        Args:
+            nx_graph (nx.classes.graph.Graph, optional): Graph to inspect.
+                Defaults to ``self.nx_graph``.
+            stop_above (int | None, optional): Early-exit threshold. If supplied,
+                the returned value may be capped at ``stop_above + 1`` once the
+                lower bound is known to be above the threshold.
+
+        Returns:
+            int: A lower bound on the number of non-empty connected induced
+            subgraphs.
+        """
+        if nx_graph is None:
+            nx_graph = self.nx_graph
+        index_to_label, _, neighbor_masks = self._get_adjacency_masks(nx_graph)
+        n = len(index_to_label)
+        if n == 0:
+            return 0
+
+        cap = stop_above + 1 if stop_above is not None else None
+        full = (1 << n) - 1
+        unvisited = full
+        children = [[] for _ in range(n)]
+        postorder: list[int] = []
+
+        def _capped(value: int) -> int:
+            if cap is not None and value > cap:
+                return cap
+            return value
+
+        while unvisited:
+            # Pick a high-degree root for this component. The bound is valid for
+            # any spanning tree; high-degree roots tend to give a tighter lower
+            # bound on branched/dense molecular graphs.
+            root = max(
+                (i for i in range(n) if unvisited & (1 << i)),
+                key=lambda i: (neighbor_masks[i].bit_count(), -i),
+            )
+            unvisited &= ~(1 << root)
+            stack = [root]
+            while stack:
+                u = stack.pop()
+                postorder.append(u)
+                nbrs = neighbor_masks[u] & unvisited
+                while nbrs:
+                    bit = nbrs & -nbrs
+                    nbrs ^= bit
+                    v = bit.bit_length() - 1
+                    unvisited &= ~bit
+                    children[u].append(v)
+                    stack.append(v)
+
+        containing_root = [0] * n
+        total = 0
+        for u in reversed(postorder):
+            count = 1
+            for v in children[u]:
+                count = _capped(count * (1 + containing_root[v]))
+            containing_root[u] = count
+            total = _capped(total + count)
+            if cap is not None and total > stop_above:
+                return total
+        return total
+
     def _precompute_prefactors(self, size_grand_coalition: int) -> list[float]:
         """Precompute Shapley prefactors for each coalition size.
 
@@ -402,6 +484,15 @@ class MyersonCalculator():
         index_to_label, _, neighbor_masks = \
             self._get_adjacency_masks(self.nx_graph)
         n = len(index_to_label)
+
+        if max_subgraphs is not None:
+            lower_bound = self.connected_subgraph_count_lower_bound(
+                stop_above=max_subgraphs)
+            if lower_bound > max_subgraphs:
+                raise MyersonBudgetExceeded(
+                    f"At least {lower_bound} connected subgraphs; "
+                    f"budget is {max_subgraphs}, so exact enumeration was "
+                    "skipped before starting (use sampling instead).")
 
         sub_masks: list[int] = []
         for root in range(n):

@@ -43,13 +43,7 @@ class MyersonExplainer(MyersonCalculator):
         self.nx_graph = to_networkx(molgraph)
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
         cc = self.number_connected_components()
-        if cc > 1:
-            self.log.warning(f"Your graph has {cc} individual components. The worth"
-                        " of the grand coalition and the prediction of a GNN can"
-                        " differ.")
-            pred = self.calculate_prediction()
-            worth = self.calculate_worth_of_grand_coalition()
-            self.log.warning(f"Prediction={pred:.4f}, Worth={worth:.4f}")
+        self._warn_if_disconnected(cc)
 
     def _forward(self, batch_mol_graph: BatchMolGraph) -> torch.Tensor:
         """Run the coalition function (MPNN) in eval mode without building an
@@ -75,6 +69,27 @@ class MyersonExplainer(MyersonCalculator):
     def _postprocess_worth(self, model_output_row: torch.Tensor) -> float:
         """Convert a single row of the (batched) model output into a worth."""
         return model_output_row.item()
+
+    def _warn_if_disconnected(self, cc: int, cached_prediction=None) -> None:
+        """Warn on disconnected inputs; compute detailed diagnostics only when verbose.
+
+        ``calculate_prediction`` and ``calculate_worth_of_grand_coalition`` each
+        run the MPNN. In dataset-scale non-verbose explanations this warning path
+        can otherwise add avoidable forwards for salts / disconnected SMILES.
+        """
+        if cc <= 1:
+            return
+        self.log.warning(f"Your graph has {cc} individual components. The worth"
+                    " of the grand coalition and the prediction of a GNN can"
+                    " differ.")
+        if not self.log.isEnabledFor(logging.INFO):
+            return
+        pred = cached_prediction if cached_prediction is not None else self.calculate_prediction()
+        worth = self.calculate_worth_of_grand_coalition()
+        try:
+            self.log.info(f"Prediction={float(pred):.4f}, Worth={float(worth):.4f}")
+        except (TypeError, ValueError):
+            self.log.info(f"Prediction={pred}, Worth={worth}")
 
     def calculate_worth_of_single_graph_restricted_coalition(self,
         graph_restricted_coalition: tuple,
@@ -318,13 +333,7 @@ class MyersonSamplingExplainer(MyersonSampler, MyersonExplainer):
         self.nx_graph = to_networkx(molgraph)
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
         cc = self.number_connected_components()
-        if cc > 1:
-            self.log.warning(f"Your graph has {cc} individual components. The worth"
-                        " of the grand coalition and the prediction of a GNN can"
-                        " differ.")
-            pred = self.calculate_prediction()
-            worth = self.calculate_worth_of_grand_coalition()
-            self.log.warning(f"Prediction={pred:.4f}, Worth={worth:.4f}")
+        self._warn_if_disconnected(cc)
 
 
 class MyersonClassExplainer(MyersonExplainer):
@@ -355,13 +364,7 @@ class MyersonClassExplainer(MyersonExplainer):
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
         self.pred = self.calculate_prediction()
         cc = self.number_connected_components()
-        if cc > 1:
-            self.log.warning(f"Your graph has {cc} individual components. The worth"
-                        " of the grand coalition and the prediction of a GNN can"
-                        " differ.")
-            pred = self.calculate_prediction()
-            worth = self.calculate_worth_of_grand_coalition()
-            self.log.warning(f"Prediction={pred}, Worth={worth}")
+        self._warn_if_disconnected(cc, cached_prediction=self.pred)
     
     def _empty_worth(self) -> torch.Tensor:
         """Worth assigned to the empty coalition (zero vector over tasks)."""
@@ -414,13 +417,7 @@ class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplai
         self.grand_coalition = list(self.nx_graph.nodes()) # alias: set of players / set of nodes / F
         self.pred = self.calculate_prediction()
         cc = self.number_connected_components()
-        if cc > 1:
-            self.log.warning(f"Your graph has {cc} individual components. The worth"
-                        " of the grand coalition and the prediction of a GNN can"
-                        " differ.")
-            pred = self.calculate_prediction()
-            worth = self.calculate_worth_of_grand_coalition()
-            self.log.warning(f"Prediction={pred}, Worth={worth}")
+        self._warn_if_disconnected(cc, cached_prediction=self.pred)
 
     def map_coalition_to_worth(self, coalitions: list[tuple], 
                        coalitions_to_graph_restricted_coalitions: dict,

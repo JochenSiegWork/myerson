@@ -36,12 +36,15 @@ from myerson.chemprop_explain.myerson import (
 )
 
 
+DEFAULT_MAX_ATOMS_PER_FORWARD = 16_000
+
+
 def explain_batch(molgraphs: list,
                   model: MPNN,
                   seed: None | int = None,
                   number_of_samples: int = 1000,
                   sample_if_more_nodes_than: int = 20,
-                  max_atoms_per_forward: int = 300_000,
+                  max_atoms_per_forward: int = DEFAULT_MAX_ATOMS_PER_FORWARD,
                   classification: bool = False,
                   verbose: bool = False) -> list:
     """Explain a *batch* of molecules, pooling the NN forward passes across
@@ -74,7 +77,9 @@ def explain_batch(molgraphs: list,
             molecule. Defaults to 20.
         max_atoms_per_forward (int, optional): Max total subgraph atoms per pooled
             forward pass; bounds GPU memory regardless of molecule size. Defaults
-            to 300_000.
+            to 16_000. Larger values can reduce the number of forwards, but may
+            make Chemprop's message-passing step slower for very large merged
+            disjoint batches.
         classification (bool, optional): If ``True``, explain a multi-output
             (classifier) model: routes to ``MyersonClassExplainer`` /
             ``MyersonSamplingClassExplainer`` and returns per-molecule arrays of
@@ -358,7 +363,8 @@ class ChempropBatchExplainer:
             into large groups. Defaults to 1500.
         max_atoms_per_forward (int, optional): Max total subgraph atoms per NN
             forward; bounds *GPU* memory regardless of molecule size. Defaults to
-            300_000.
+            16_000. Larger values can reduce forward-count overhead, but can be
+            slower for large merged Chemprop batches.
         group_size (int, optional): Hard cap on molecules per group (safety net on
             top of the atom budget). Defaults to 512.
         classification (bool, optional): Explain a multi-output (classifier)
@@ -373,7 +379,7 @@ class ChempropBatchExplainer:
                  number_of_samples: int = 1000,
                  seed: None | int = None,
                  max_atoms_per_group: int = 1500,
-                 max_atoms_per_forward: int = 300_000,
+                 max_atoms_per_forward: int = DEFAULT_MAX_ATOMS_PER_FORWARD,
                  group_size: int = 512,
                  classification: bool = False,
                  verbose: bool = False) -> None:

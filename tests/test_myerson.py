@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import networkx as nx
-from myerson import MyersonCalculator, MyersonSampler
+from myerson import MyersonBudgetExceeded, MyersonCalculator, MyersonSampler
 
 
 def gloves_game_coalition_function(coalition: tuple,
@@ -74,6 +74,34 @@ class TestMyersonCalculator:
         solution = np.array([2/3, 1/6, 1/6])
         for my, sol in zip(my_values, solution):
             assert my == pytest.approx(sol, abs=1e-5), f"{my_values=}, {solution=}"
+
+    def test_connected_subgraph_count_lower_bound_is_exact_for_trees(self):
+        path = nx.path_graph(5)
+        calc = MyersonCalculator(path, lambda coalition, graph: 0.0)
+        # A path on n nodes has n * (n + 1) / 2 connected induced subgraphs.
+        assert calc.connected_subgraph_count_lower_bound() == 15
+
+        star = nx.star_graph(4)
+        calc = MyersonCalculator(star, lambda coalition, graph: 0.0)
+        # Star connected subgraphs: every non-empty leaf subset with the centre,
+        # plus each singleton leaf.
+        assert calc.connected_subgraph_count_lower_bound() == 2**4 + 4
+
+    def test_budget_preflight_skips_doomed_enumeration_before_worth_calls(self):
+        graph = nx.path_graph(20)
+        calls = 0
+
+        def counted_worth(coalition, nx_graph):
+            nonlocal calls
+            calls += 1
+            return float(len(coalition))
+
+        calc = MyersonCalculator(graph, counted_worth)
+        calc._connected_enum_max_subgraphs = 100
+
+        with pytest.raises(MyersonBudgetExceeded):
+            calc.calculate_all_myerson_values()
+        assert calls == 0
 
 
 class TestMyersonSampler:
