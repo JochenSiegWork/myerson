@@ -1,7 +1,6 @@
 from .myerson import MyersonExplainer, MyersonSamplingExplainer
 from .myerson import MyersonClassExplainer, MyersonSamplingClassExplainer
 from .myerson import explain
-from .batch import explain_batch, ChempropBatchExplainer
 
 __all__ = [
     "MyersonExplainer",
@@ -9,6 +8,4 @@ __all__ = [
     "MyersonClassExplainer",
     "MyersonSamplingClassExplainer",
     "explain",
-    "explain_batch",
-    "ChempropBatchExplainer",
 ]
