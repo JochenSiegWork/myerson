@@ -3,7 +3,7 @@ import networkx as nx
 import numpy as np
 from itertools import combinations, chain
 
-from typing import Callable 
+from typing import Callable
 
 from tqdm import tqdm
 import logging
@@ -17,8 +17,8 @@ class MyersonBudgetExceeded(Exception):
     """
 
 
-class MyersonCalculator():
-    r"""Calculates the exact Myerson values. 
+class MyersonCalculator:
+    r"""Calculates the exact Myerson values.
         For a game described by a coalition function :math:`v` the Myerson values
         attribute the individual players contribution to the payoff of the game. For
         a complete graph (every node connected to every other node) the Myerson
@@ -30,14 +30,14 @@ class MyersonCalculator():
             \text{Sh}_i\,({v}) = \sum_{S \subseteq N \setminus \{i\}} \frac{|S|! \: (|N| - |S| - 1)!}{|N|!}\big( {v}\,(S \cup \{i\}) - {v}\,(S) \big)
 
         Else, the additional gain players can obtain through coalition is
-        restricted only to players which are connected by edges in the graph. 
+        restricted only to players which are connected by edges in the graph.
 
     Args:
         graph (nx.classes.graph.Graph): The coalition structure of the game.
         coalition_function (Callable): The coalition for which to calculate
             the payoff of the game. Expects a coalition (tuple of node
             indices) and a graph which contains additional information on
-            the players to decide on the payoff. 
+            the players to decide on the payoff.
 
         disable_tqdm (bool, optional): Disables progress bar. Defaults to
             True.
@@ -66,12 +66,12 @@ class MyersonCalculator():
 
         Args:
             grand_coalition (list): Set of players / grand coalition / atoms in
-                graph as a list of tupels.
+                graph as a list of tuples.
 
         Returns:
             list: All :math:`2^N` coalitions.
         """
-        self.log.info(f"Calculating number of coalitions.")
+        self.log.info("Calculating number of coalitions.")
         coalitions = [combinations(grand_coalition, len(grand_coalition)-x) for x in \
                       tqdm(range(len(grand_coalition)), desc="Calculate coalitions", disable=self.disable_tqdm)]
         coalitions = list(chain.from_iterable(coalitions)) # chaining removes empty set
@@ -79,9 +79,9 @@ class MyersonCalculator():
         self.log.info(f"Number of coalitions: {len(coalitions)}")
         return coalitions
 
-    def calculate_graph_restricted_coalitions(self, coalitions: list, 
+    def calculate_graph_restricted_coalitions(self, coalitions: list,
                                   nx_graph: nx.classes.graph.Graph) -> tuple[set, dict]:
-        """Calculate the graph restricted coalitions for each coalition. The 
+        """Calculate the graph restricted coalitions for each coalition. The
         graph restricted coalitions are tuples of nodes which are connected.
 
         Args:
@@ -94,14 +94,14 @@ class MyersonCalculator():
                 a tuple of nodes, dictionary mapping each coalition to its
                 graph restricted coalitions.
         """
-        self.log.info(f"Calculating number of graph restricted coalitions.")
+        self.log.info("Calculating number of graph restricted coalitions.")
         graph_restricted_coalitions = [self.restrict(coalition, nx_graph) \
                                        for coalition in tqdm(coalitions,
                                            desc="Calculate graph restricted coalitions",
                                            disable=self.disable_tqdm)]
-        coalitions_to_graph_restricted_coalitions = dict(zip(coalitions, graph_restricted_coalitions))
+        coalitions_to_graph_restricted_coalitions = dict(zip(coalitions, graph_restricted_coalitions, strict=True))
         graph_restricted_coalitions = list(chain.from_iterable(graph_restricted_coalitions))
-        self.log.info(f"Removing dublicates from {len(graph_restricted_coalitions)} graph restricted coalitions.")
+        self.log.info(f"Removing duplicates from {len(graph_restricted_coalitions)} graph restricted coalitions.")
         graph_restricted_coalitions = set(x for x in tqdm(graph_restricted_coalitions, desc="Remove duplicates", disable=self.disable_tqdm))
         self.log.info(f"Number of graph restricted coalitions: {len(graph_restricted_coalitions)}")
         return graph_restricted_coalitions, coalitions_to_graph_restricted_coalitions
@@ -116,21 +116,21 @@ class MyersonCalculator():
             graph_restricted_coalition (tuple): Graph restricted coalition as
                 node indices.
             nx_graph (nx.classes.graph.Graph): Additional information for the
-                coalition function, i.e. the entire graph with node parameters. 
+                coalition function, i.e. the entire graph with node parameters.
                 The result of the coalition function should depend only on the
-                coalition, however the node parameters might contain necessary 
+                coalition, however the node parameters might contain necessary
                 information.
 
         Returns:
             float: Worth, the output of the coalition function for the connected
-            subgraph. 
+            subgraph.
         """
         return self.coalition_function(graph_restricted_coalition, nx_graph)
 
     def calculate_worth_of_graph_restricted_coalitions(self,
         graph_restricted_coalitions: set) -> dict:
         """Calculate the worth of every graph restricted coalition and map it to
-        its worth. 
+        its worth.
 
         Args:
             graph_restricted_coalitions (set): Set of connected components as
@@ -139,38 +139,38 @@ class MyersonCalculator():
         Returns:
             dict: Dictionary mapping each connected component to its worth.
         """
-        self.log.info(f"Calculating worth of graph restricted coalitions.")
+        self.log.info("Calculating worth of graph restricted coalitions.")
         graph_restricted_coalitions_to_worth = {}
         for coalition in tqdm(graph_restricted_coalitions,
                               desc="Calculating worth of graph restricted coalitions",
                               disable=self.disable_tqdm):
             worth = self.calculate_worth_of_single_graph_restricted_coalition(coalition,
                                                                               self.nx_graph)
-            graph_restricted_coalitions_to_worth.update({coalition: worth})
+            graph_restricted_coalitions_to_worth[coalition] = worth
         return graph_restricted_coalitions_to_worth
 
-    def map_coalition_to_worth(self, coalitions: list[tuple], 
+    def map_coalition_to_worth(self, coalitions: list[tuple],
                        coalitions_to_graph_restricted_coalitions: dict,
                        graph_restricted_coalitions_to_worth: dict) -> dict:
         """Map every coalition to its worth.
 
         Args:
-            coalitions (list): List of all coalitions (2^{num_nodes}). 
+            coalitions (list): List of all coalitions (2^{num_nodes}).
             coalitions_to_graph_restricted_coalitions (dict): Dictionary mapping
                 the coalitions to the corresponding graph restricted coalitions.
-            graph_restricted_coalitions_to_worth (dict): Dictionary mapping the 
+            graph_restricted_coalitions_to_worth (dict): Dictionary mapping the
                 graph restricted coalitions to their worth.
 
         Returns:
             dict: Dictionary mapping each coalition to its worth.
         """
-        self.log.info(f"Mapping coalitions to worth.")
+        self.log.info("Mapping coalitions to worth.")
         coalition_to_worth = {}
         for coalition in tqdm(coalitions, desc="Mapping coalitions to worth", disable=self.disable_tqdm):
             worth = 0.
             for graph_restricted_coalition in coalitions_to_graph_restricted_coalitions[coalition]:
                 worth += graph_restricted_coalitions_to_worth[graph_restricted_coalition]
-            coalition_to_worth.update({coalition: worth})
+            coalition_to_worth[coalition] = worth
         return coalition_to_worth
 
     def calculate_worth_of_grand_coalition(self, nx_graph: nx.classes.graph.Graph) -> float:
@@ -178,8 +178,6 @@ class MyersonCalculator():
         grand coalition.
 
         Args:
-            coalition_function (Callable): The coalition function associating a
-                coalition with a payoff.
             nx_graph (nx.classes.graph.Graph): Coalition structure of the game
                 as a graph.
 
@@ -189,7 +187,7 @@ class MyersonCalculator():
         restricted_grand_coalition = self.restrict(self.grand_coalition, nx_graph)
         worth = sum([self.calculate_worth_of_single_graph_restricted_coalition(S, nx_graph) \
                      for S in restricted_grand_coalition])
-        return worth 
+        return worth
 
     def _get_adjacency_masks(self, nx_graph: nx.classes.graph.Graph):
         """Build (and cache) a bitmask adjacency representation of ``nx_graph``.
@@ -236,6 +234,70 @@ class MyersonCalculator():
         self._adj_index_to_label = index_to_label
         self._adj_neighbor_masks = neighbor_masks
         return index_to_label, label_to_index, neighbor_masks
+
+    @staticmethod
+    def _connected_component_masks(node_mask: int,
+                                   neighbor_masks: list[int]) -> list[int]:
+        """Split a bitmask of nodes into its connected-component bitmasks.
+
+        Grows components with integer-bitmask BFS over ``neighbor_masks`` (from
+        :meth:`_get_adjacency_masks`). Edges leaving ``node_mask`` are ignored,
+        so each returned integer is a connected component of the subgraph
+        induced by ``node_mask``. Components are yielded lowest-node-first and
+        the empty mask yields ``[]``.
+
+        Args:
+            node_mask (int): Bitmask of the nodes to partition. Bit ``i`` set
+                means index ``i`` is present.
+            neighbor_masks (list[int]): Adjacency bitmasks; ``neighbor_masks[i]``
+                has bit ``j`` set iff indices ``i`` and ``j`` are adjacent.
+
+        Returns:
+            list[int]: One bitmask per connected component.
+        """
+        components = []
+        remaining = node_mask
+        while remaining:
+            # Grow a component starting from the lowest remaining node.
+            frontier = remaining & (-remaining)
+            component = 0
+            while frontier:
+                component |= frontier
+                neighbours = 0
+                f = frontier
+                while f:
+                    low = f & (-f)
+                    neighbours |= neighbor_masks[low.bit_length() - 1]
+                    f ^= low
+                # Only follow edges that stay inside node_mask.
+                frontier = neighbours & remaining & ~component
+            remaining &= ~component
+            components.append(component)
+        return components
+
+    @staticmethod
+    def _mask_to_labels(node_mask: int, index_to_label: list) -> tuple:
+        """Expand a node bitmask into a tuple of node labels.
+
+        Nodes come out in ascending index order (deterministic), so the result
+        is a stable dictionary key.
+
+        Args:
+            node_mask (int): Bitmask of the nodes; bit ``i`` set means index
+                ``i`` is present.
+            index_to_label (list): Maps integer index ``i`` to its node label
+                (see :meth:`_get_adjacency_masks`).
+
+        Returns:
+            tuple: Node labels of the set bits, ascending by index.
+        """
+        labels = []
+        m = node_mask
+        while m:
+            low = m & (-m)
+            labels.append(index_to_label[low.bit_length() - 1])
+            m ^= low
+        return tuple(labels)
 
     def number_connected_components(self, nx_graph: nx.classes.graph.Graph | None = None) -> int:
         """Count the connected components of ``nx_graph`` (default: ``self.nx_graph``).
@@ -284,38 +346,14 @@ class MyersonCalculator():
         index_to_label, label_to_index, neighbor_masks = \
             self._get_adjacency_masks(nx_graph)
 
-        # Bitmask of the nodes that still need to be assigned to a component.
-        remaining = 0
+        # Bitmask of the nodes that remain in the graph.
+        node_mask = 0
         for label in coalition:
-            remaining |= (1 << label_to_index[label])
+            node_mask |= (1 << label_to_index[label])
 
-        components = []
-        while remaining:
-            # Grow a component starting from the lowest remaining node.
-            frontier = remaining & (-remaining)
-            component = 0
-            while frontier:
-                component |= frontier
-                neighbours = 0
-                f = frontier
-                while f:
-                    low = f & (-f)
-                    neighbours |= neighbor_masks[low.bit_length() - 1]
-                    f ^= low
-                # Only follow edges that stay inside the coalition.
-                frontier = neighbours & remaining & ~component
-            remaining &= ~component
-
-            # Expand the component bitmask back into node labels.
-            comp_labels = []
-            c = component
-            while c:
-                low = c & (-c)
-                comp_labels.append(index_to_label[low.bit_length() - 1])
-                c ^= low
-            components.append(tuple(comp_labels))
-
-        return components
+        return [self._mask_to_labels(component, index_to_label)
+                for component in self._connected_component_masks(
+                    node_mask, neighbor_masks)]
     def subgraph_from_coalition(self, graph_restricted_coalition: tuple,
                                nx_graph: nx.classes.graph.Graph) -> nx.classes.graph.Graph:
         """Generates a subgraph from a graph restricted coalition (a subset of
@@ -383,6 +421,7 @@ class MyersonCalculator():
                 return cap
             return value
 
+        # DFS to find spanning trees
         while unvisited:
             # Pick a high-degree root for this component. The bound is valid for
             # any spanning tree; high-degree roots tend to give a tighter lower
@@ -405,10 +444,12 @@ class MyersonCalculator():
                     children[u].append(v)
                     stack.append(v)
 
+        # count connected vertex subsets of the spanning forest, basically all subpaths in the tree
+        # which is a lower bound to all induced subgraphs in the real graph.
         containing_root = [0] * n
         total = 0
         for u in reversed(postorder):
-            count = 1
+            count = 1                          # the empty choice for each child branch
             for v in children[u]:
                 count = _capped(count * (1 + containing_root[v]))
             containing_root[u] = count
@@ -544,20 +585,22 @@ class MyersonCalculator():
             # `seen` = vertices that may never (re-)enter the frontier: the root,
             # all lower vertices, and everything already queued in the frontier.
             seen0 = below | (1 << root) | init_ext
+            # Stack items are (sub, ext, seen): the current subgraph, its
+            # extension frontier (candidates to add), and the forbidden set.
             stack = [(1 << root, init_ext, seen0)]
             while stack:
                 sub, ext, seen = stack.pop()
-                sub_masks_rank.append(sub)
+                sub_masks_rank.append(sub)         # sub is a finished subgraph
                 if max_subgraphs is not None \
                         and len(sub_masks_rank) > max_subgraphs:
                     raise MyersonBudgetExceeded(
                         f"More than {max_subgraphs} connected subgraphs; "
                         "exact enumeration aborted (use sampling instead).")
-                e = ext
+                e = ext                            # remaining candidates to branch on
                 while e:
-                    w = e & (-e)
+                    w = e & (-e)                   # next candidate vertex (bit)
                     e ^= w                          # consume w at this level
-                    wi = w.bit_length() - 1
+                    wi = w.bit_length() - 1        # its vertex (rank) index
                     new_nbrs = rank_neighbor_masks[wi] & ~seen  # exclusive neighbors
                     # Child keeps the remaining siblings (`e`) plus w's new
                     # exclusive neighbors; `seen` accumulates only down a branch.
@@ -569,19 +612,19 @@ class MyersonCalculator():
         sub_masks: list[int] = []
         sub_tuples: list[tuple] = []
         neighbour_masks_of_sub: list[int] = []
-        for rm in sub_masks_rank:
-            orig_mask = 0
+        for rm in sub_masks_rank:                  # rm: rank-space subgraph mask
+            orig_mask = 0                          # same subgraph in original space
             labels = []
             m = rm
-            while m:
+            while m:                               # walk the vertices of the subgraph
                 low = m & (-m)
-                idx = rank_to_index[low.bit_length() - 1]
+                idx = rank_to_index[low.bit_length() - 1]  # rank -> original index
                 orig_mask |= 1 << idx
                 labels.append(index_to_label[idx])
                 m ^= low
             sub_masks.append(orig_mask)
             sub_tuples.append(tuple(labels))
-            nbr = 0
+            nbr = 0                                # accumulate N(S) in original space
             c = orig_mask
             while c:
                 low = c & (-c)
@@ -659,22 +702,25 @@ class MyersonCalculator():
             mv = np.zeros((n, n_tasks), dtype=np.float64)
 
         fact = [math.factorial(k) for k in range(n + 1)]
-        for mask, tup, nbr in zip(sub_masks, sub_tuples, neighbour_masks):
-            value, _ = self._coerce_worth(worth_by_tuple[tup])
+        # Accumulate Skibski Alg. 4 lines 19-22: one weighted worth per subgraph.
+        for mask, tup, nbr in zip(sub_masks, sub_tuples, neighbour_masks, strict=True):
+            value, _ = self._coerce_worth(worth_by_tuple[tup])  # v(S)
             if scalar and value == 0.0:
-                continue
-            s = len(tup)
-            t = bin(nbr).count("1")
-            denom = fact[s + t]
+                continue                       # contributes nothing to any node
+            s = len(tup)                       # |S|
+            t = bin(nbr).count("1")            # |N(S)|
+            denom = fact[s + t]                # (|S|+|N(S)|)!
+            # Positive weight for members of S (all of S before u, N(S) after u).
             pos = fact[s - 1] * fact[t] / denom
-            m = mask
+            m = mask                           # walk the bits (vertices) of S
             while m:
-                low = m & (-m)
+                low = m & (-m)                 # lowest set bit
                 mv[low.bit_length() - 1] += pos * value
-                m ^= low
+                m ^= low                       # clear it, advance
             if t:
+                # Negative weight for neighbours of S (adding u reconnects S).
                 neg = fact[s] * fact[t - 1] / denom
-                c = nbr
+                c = nbr                        # walk the bits (vertices) of N(S)
                 while c:
                     low = c & (-c)
                     mv[low.bit_length() - 1] -= neg * value
@@ -702,13 +748,17 @@ class MyersonCalculator():
         budget = getattr(self, "_connected_enum_max_subgraphs", None)
         my_values = self._calculate_all_myerson_values_connected_enum(
             max_subgraphs=budget)
-        log_string = "".join([f"\t{node}: {val}\n" for node, val in zip(self.grand_coalition, my_values)])
+        log_string = "".join([f"\t{node}: {val}\n" for node, val in zip(self.grand_coalition, my_values, strict=True)])
         self.log.info(f"Myerson Values:\n{log_string}")
         return my_values
 
     def calculate_all_mappings(self) -> None:
-        """Calculates all coalitions, graph restricted coalitions, and their
-        associated worths as class attributes:
+        """Legacy full-lattice pipeline: enumerate all ``2^N`` coalitions, their
+        graph restricted coalitions, and the associated worths as class
+        attributes. The production exact path is
+        :meth:`calculate_all_myerson_values` (connected-subgraph enumeration),
+        which never materialises the coalition lattice; this method is kept for
+        callers that need the full per-coalition mappings.
 
             * `self.coalitions` (list[tuple])
             * `self.graph_restricted_coalitions` (set[tuple])
@@ -731,7 +781,7 @@ class MyersonCalculator():
 
 class MyersonSampler(MyersonCalculator):
     r"""A class approximating the Myerson value using Monte Carlo sampling.
-        The Myerson values are approximated by randomly sampling from all  
+        The Myerson values are approximated by randomly sampling from all
         permutations needed to calculate the Shapley value:
 
         .. math::
@@ -746,7 +796,7 @@ class MyersonSampler(MyersonCalculator):
         coalition_function (Callable): The coalition for which to calculate
             the payoff of the game. Expects a coalition (tuple of node
             indices) and a graph which contains additional information on
-            the players to decide on the payoff. 
+            the players to decide on the payoff.
         seed (None | int, optional): Seed for randomness. Defaults to None.
         number_of_samples (int, optional): Number of sampling steps. Defaults to 1000.
         disable_tqdm (bool, optional): Disables progress bar. Defaults to True.
@@ -754,20 +804,16 @@ class MyersonSampler(MyersonCalculator):
     def __init__(self,
                  graph: nx.classes.graph.Graph,
                  coalition_function: Callable,
-                 seed: None | int = None, 
+                 seed: None | int = None,
                  number_of_samples: int = 1000,
                  disable_tqdm: bool=True) -> None:
-
-        self.disable_tqdm = disable_tqdm
+        """Instantiate the class.
+        """
+        super().__init__(graph, coalition_function, disable_tqdm)
         self.log = logging.getLogger("MyersonSampler")
-        self.nx_graph = graph
-        self.grand_coalition = list(graph.nodes()) # alias: set of players / set of nodes / F
-        self.coalition_function = coalition_function
         self.seed = seed
         self.rng = np.random.default_rng(seed)
         self.number_of_samples = number_of_samples
-        """Instantiates the class.
-        """
 
     @staticmethod
     def _replace_in_array(array: np.ndarray, value_to_replace, value_to_replace_with) -> np.ndarray:
@@ -799,10 +845,6 @@ class MyersonSampler(MyersonCalculator):
     def _sample_base_permutations(self, number_of_samples: int):
         """RNG-driven core of :meth:`sample_permutations`: draw the base
         prefix-coalitions, each excluding the randomly chosen pivot node.
-
-        This isolates the random draws (so the optimized bitmask pipeline and
-        the legacy :meth:`sample_permutations` produce identical samples for a
-        given seed).
 
         Returns:
             tuple(int, list[np.ndarray]): the pivot node, and the sampled
@@ -875,11 +917,6 @@ class MyersonSampler(MyersonCalculator):
     def _build_sampling_worth_by_mask(self) -> dict:
         """Enumerate the sampled connected components, evaluate their worth, and
         build the bitmask-keyed worth table (single-molecule path).
-
-        Split into :meth:`_enumerate_sampling_components` (no NN) and
-        :meth:`_finish_sampling_worth_by_mask` so the worth evaluation can be
-        *pooled across molecules* in a single batched forward (see the chemprop
-        ``explain_batch``).
         """
         components = self._enumerate_sampling_components()
         graph_restricted_coalitions_to_worth = \
@@ -908,15 +945,11 @@ class MyersonSampler(MyersonCalculator):
         the queried coalitions come in with/without-``j`` pairs, so we compute
         ``components(S)`` once (bitmask BFS, memoised) and derive
         ``components(S∪{j})`` by merging the components adjacent to ``j`` (a few
-        bitwise ANDs) instead of an independent connected-components pass. The
-        component *set* is identical to calling ``restrict`` on every coalition,
-        so the resulting worths — and therefore the sampled Myerson values — are
-        unchanged for a given seed.
+        bitwise ANDs) instead of an independent connected-components pass.
         """
         index_to_label, label_to_index, neighbor_masks = \
             self._get_adjacency_masks(self.nx_graph)
-        nodes = list(self.grand_coalition)
-        n = len(nodes)
+        n = len(self.grand_coalition)
         node_bits = [1 << i for i in range(n)]
         random_node_bit = 1 << label_to_index[self.random_node]
 
@@ -931,29 +964,9 @@ class MyersonSampler(MyersonCalculator):
         # empty coalition). Memoised across the whole sampled query set.
         components_of: dict[int, list[int]] = {}
 
-        def _components_from_scratch(mask: int) -> list[int]:
-            comps = []
-            remaining = mask
-            while remaining:
-                frontier = remaining & (-remaining)
-                comp = 0
-                while frontier:
-                    comp |= frontier
-                    neighbours = 0
-                    f = frontier
-                    while f:
-                        low = f & (-f)
-                        neighbours |= neighbor_masks[low.bit_length() - 1]
-                        f ^= low
-                    frontier = neighbours & remaining & ~comp
-                remaining &= ~comp
-                comps.append(comp)
-            return comps
-
         # For each base coalition and player j, build the with/without-j pair.
         # components(without) is computed once (memoised); components(with) is
         # derived by the single-vertex merge (§4.1) — no second BFS.
-        needed_masks = set()
         for mask in base_masks:
             for j in range(n):
                 bit = node_bits[j]
@@ -962,7 +975,8 @@ class MyersonSampler(MyersonCalculator):
 
                 comps_without = components_of.get(without)
                 if comps_without is None:
-                    comps_without = _components_from_scratch(without)
+                    comps_without = self._connected_component_masks(
+                        without, neighbor_masks)
                     components_of[without] = comps_without
 
                 if with_node not in components_of:
@@ -976,18 +990,6 @@ class MyersonSampler(MyersonCalculator):
                             kept.append(c)
                     kept.append(merged)
                     components_of[with_node] = kept
-
-                needed_masks.add(without)
-                needed_masks.add(with_node)
-
-        def _mask_to_tuple(mask: int) -> tuple:
-            labels = []
-            m = mask
-            while m:
-                low = m & (-m)
-                labels.append(index_to_label[low.bit_length() - 1])
-                m ^= low
-            return tuple(labels)
 
         # Only the *unique connected components* are converted to node-tuples
         # (these are what the worth / NN forward consumes, and there are far
@@ -1004,7 +1006,8 @@ class MyersonSampler(MyersonCalculator):
             if mask == 0:
                 has_empty = True
             unique_component_masks.update(comps)
-        component_tuple_of = {c: _mask_to_tuple(c) for c in unique_component_masks}
+        component_tuple_of = {c: self._mask_to_labels(c, index_to_label)
+                              for c in unique_component_masks}
 
         self._node_bits = node_bits
         self._random_node_bit = random_node_bit
@@ -1027,8 +1030,7 @@ class MyersonSampler(MyersonCalculator):
     def _finish_sampling_worth_by_mask(self,
             graph_restricted_coalitions_to_worth: dict) -> dict:
         """Given worths for the unique connected components (computed
-        single-molecule or in a pooled cross-molecule batched forward, see
-        ``explain_batch``), assemble the bitmask-keyed worth table the value loop
+        single-molecule), assemble the bitmask-keyed worth table the value loop
         consumes.
 
         Fully bitmask-native: ``_worth_by_mask[m]`` is the sum of the worths of
@@ -1103,11 +1105,8 @@ class MyersonSampler(MyersonCalculator):
     def _sampled_myerson_values_from_prepared(self) -> np.ndarray:
         """Run the integer-bitmask marginal-contribution value loop using the
         already-prepared worth table (``self._worth_by_mask`` etc.).
-
-        Factored out of :meth:`sample_all_myerson_values` so a cross-molecule
-        batched pipeline can fill the worth table externally and then call this.
         """
-        self.log.info(f"Calculating sampled Myerson values.")
+        self.log.info("Calculating sampled Myerson values.")
         worth = self._worth_by_mask
         node_bits = self._node_bits
         random_node_bit = self._random_node_bit
@@ -1123,9 +1122,8 @@ class MyersonSampler(MyersonCalculator):
                 without = ((mask ^ bit) | random_node_bit) if (mask & bit) else mask
                 acc[j] += worth[without | bit] - worth[without]
 
-
         my_values = np.array(acc, dtype=float) / self.number_of_samples
-        log_string = "".join([f"\t{node}: {val:.4f}\n" for node, val in zip(self.grand_coalition, my_values)])
+        log_string = "".join([f"\t{node}: {val:.4f}\n" for node, val in zip(self.grand_coalition, my_values, strict=True)])
         self.log.info(f"Sampled Myerson Values:\n{log_string}")
         return my_values
 
@@ -1134,9 +1132,9 @@ class MyersonSampler(MyersonCalculator):
 
         Raises:
             NotImplementedError: The MyersonSampler only has the
-                `sample_all_myerson_values()` method. To accuratly calculate the
+                `sample_all_myerson_values()` method. To accurately calculate the
                 Myerson values, please use the `MyersonCalculator` class.
         """
         raise NotImplementedError("""The MyersonSampler only has the `sample_all_myerson_values()` method.
-                     To accuratly calculate the Myerson values,
+                     To accurately calculate the Myerson values,
                      please use the `MyersonCalculator` class.""")

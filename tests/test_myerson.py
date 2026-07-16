@@ -1,30 +1,9 @@
+"""Core exact-calculator and sampler behaviour."""
 import pytest
 import numpy as np
 import networkx as nx
 from myerson import MyersonBudgetExceeded, MyersonCalculator, MyersonSampler
-
-
-def gloves_game_coalition_function(coalition: tuple,
-                                   nx_graph: nx.classes.graph.Graph) -> float:
-    """Coalition function for the gloves game.
-
-    Args:
-        coalition (tuple): The coalition for which to calculate the payoff
-            of the game.
-        nx_graph (nx.classes.graph.Graph): For this implementation of the
-            gloves game, we expect a networkX graph which has nodes with a
-            `glove` attribute that can be either `right` or `left`.
-
-    Returns:
-        float: Worth of the coalition.
-    """
-    if len(coalition) <= 1:
-        return 0.
-
-    gloves = nx.get_node_attributes(nx_graph, 'glove')
-    r = sum([1 for k, v in gloves.items() if (v=="right" and k in coalition)])
-    l = sum([1 for k, v in gloves.items() if (v=="left" and k in coalition)])
-    return float(min(r, l))
+from .myerson_helpers import gloves_game_coalition_function
 
 
 class TestMyersonCalculator:
@@ -102,7 +81,6 @@ class TestMyersonCalculator:
         with pytest.raises(MyersonBudgetExceeded):
             calc.calculate_all_myerson_values()
         assert calls == 0
-
 
 class TestMyersonSampler:
 
