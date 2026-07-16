@@ -81,13 +81,17 @@ class MyersonExplainer(MyersonCalculator):
 
         Returns a detached CPU tensor of shape ``(B, tasks)`` (one row per graph
         in the ``batch`` vector). The model's ``training`` flag is restored.
+
+        Note: toggling ``eval``/``train`` mutates the module's mode in place and is
+        not thread-safe. Do not share the model with concurrent train/inference
+        threads while an explainer is running.
         """
         model = self.coalition_function
         was_training = model.training
         model.eval()
         try:
             with torch.inference_mode():
-                return model(x, edge_index, batch).detach().cpu()
+                return model(x, edge_index, batch).cpu()
         finally:
             model.train(was_training)
 
@@ -116,7 +120,7 @@ class MyersonExplainer(MyersonCalculator):
             float: Worth, the output of the coalition function for the connected
             subgraph. 
         """
-        if graph_restricted_coalition == ():
+        if not graph_restricted_coalition:
             return self._empty_worth()
         subgraph = self.subgraph_from_coalition(graph_restricted_coalition, pyg_graph)
         out = self._forward(subgraph.x, subgraph.edge_index, self._batch_var(subgraph))
@@ -131,8 +135,7 @@ class MyersonExplainer(MyersonCalculator):
         The non-empty connected components are evaluated in *batches*: many
         subgraphs are collated into a single disjoint-union PyG graph (one
         ``batch`` vector entry per subgraph) and run through the GNN in one
-        forward pass (under ``torch.inference_mode`` + ``eval``). This is
-        dramatically faster than one forward pass per coalition.
+        forward pass (under ``torch.inference_mode`` + ``eval``).
 
         Args:
             graph_restricted_coalitions (list): Connected components as tuples of
@@ -150,7 +153,7 @@ class MyersonExplainer(MyersonCalculator):
 
         non_empty = []
         for coalition in graph_restricted_coalitions:
-            if coalition == ():
+            if not coalition:
                 graph_restricted_coalitions_to_worth[()] = self._empty_worth()
             else:
                 non_empty.append(coalition)
@@ -161,9 +164,9 @@ class MyersonExplainer(MyersonCalculator):
             chunk = non_empty[start:start + batch_size]
             x, edge_index, batch = self._batch_data_from_coalitions(chunk)
             out = self._forward(x, edge_index, batch)
-            for i, coalition in enumerate(chunk):
+            for coalition, worth in zip(chunk, out):
                 graph_restricted_coalitions_to_worth[coalition] = \
-                    self._postprocess_worth(out[i])
+                    self._postprocess_worth(worth)
         return graph_restricted_coalitions_to_worth
 
     def _batch_data_from_coalitions(self, coalitions: list):
@@ -431,7 +434,7 @@ class MyersonClassExplainer(MyersonExplainer):
             tensor: Worth, the output of the coalition function for the connected
             subgraph. 
         """
-        if graph_restricted_coalition == ():
+        if not graph_restricted_coalition:
             return self._empty_worth()
         subgraph = self.subgraph_from_coalition(graph_restricted_coalition, pyg_graph)
         out = self._forward(subgraph.x, subgraph.edge_index, self._batch_var(subgraph))

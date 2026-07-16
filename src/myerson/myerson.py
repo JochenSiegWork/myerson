@@ -204,6 +204,16 @@ class MyersonCalculator():
 
         Returns:
             tuple: ``(index_to_label, label_to_index, neighbor_masks)``.
+
+            - ``index_to_label`` (list): maps integer index ``i`` to its node
+              label, i.e. ``index_to_label[i]`` is the ``nx_graph`` node at
+              index ``i``. Labels are whatever the graph uses (any hashable;
+              usually ``int``).
+            - ``label_to_index`` (dict): the inverse mapping, from node label to
+              integer index.
+            - ``neighbor_masks`` (list[int]): one bitmask per index;
+              ``neighbor_masks[i]`` has bit ``j`` set iff nodes ``i`` and ``j``
+              are adjacent. Self-loops are ignored.
         """
         if getattr(self, "_adj_graph_id", None) == id(nx_graph):
             return (self._adj_index_to_label,
@@ -320,7 +330,7 @@ class MyersonCalculator():
         Returns:
             nx.classes.graph.Graph: The new subgraph.
         """
-        if len(graph_restricted_coalition) == 0:
+        if not graph_restricted_coalition:
             return nx.Graph()
         else:
             return nx_graph.subgraph(graph_restricted_coalition)
@@ -447,39 +457,52 @@ class MyersonCalculator():
             my += prefactors[size_coalition] * (worth_of_coalition_with_node - worth_of_coalition)
         return my
 
-    # ------------------------------------------------------------------ #
-    # Connected-subgraph-enumeration Myerson value
-    # after Skibski, Michalak, Rahwan & Wooldridge, "Algorithms for the
-    # Shapley and Myerson Values in Graph-restricted Games", AAMAS 2014
-    # (Algorithm 4). This never touches the 2^N coalition lattice: it enumerates only the |C|
-    # *connected induced subgraphs* and uses the closed-form neighbour-set
-    # weighting. Time O(|C|*deg), memory O(|C|) (streamable to O(V)). This is
-    # the right path to push *exact* values to larger sparse graphs (molecules)
-    # where |C| << 2^N.
-    # ------------------------------------------------------------------ #
     def _enumerate_connected_subgraphs(
             self, max_subgraphs: int | None = None) -> tuple[list, list, list]:
         """Enumerate every connected induced subgraph of ``self.nx_graph``
-        exactly once (ESU / reverse-search; Skibski et al. 2014, Alg. 1).
+        exactly once (Skibski et al. 2014, Algorithm 1 - an ESU-style DFS
+        enumeration in the sense of Wernicke 2006). This is an iterative,
+        bitmask variant: ``below``/``seen`` play the role of the paper's
+        forbidden set ``X`` and the per-root loop enforces the min-index-root
+        uniqueness invariant. Vertices are pre-ordered by degree descending
+        (paper Alg. 1, line 2) to shrink later roots' frontiers. The resulting
+        ``(S, N(S))`` pairs feed the Skibski et al. 2014 neighbour-set weighting
+        in :meth:`_calculate_all_myerson_values_connected_enum`.
 
-        Each connected subgraph has a unique minimum-index vertex; we only grow
-        a subgraph with vertices of larger index than its root and only add the
-        *exclusive* neighbours of each newly added vertex (those not already in
-        the subgraph or its frontier), which guarantees each subgraph is emitted
-        once. Everything is done on integer bitmasks over the cached adjacency.
+        This never touches the 2^N coalition lattice: it enumerates only the |C|
+        *connected induced subgraphs* and uses the closed-form neighbor-set
+        weighting. Time O(|C| * |E|), memory O(|C|). For sparse graphs (molecules)
+        |C| << 2^N.
+
+        Skibski, O., Michalak, T.P., Rahwan, T. and Wooldridge, M., 2014.
+        Algorithms for the Shapley and Myerson values in graph-restricted games.
+        In Proceedings of the 2014 international conference on Autonomous agents and
+        multi-agent systems (pp. 197-204).
+
+        Wernicke, S., 2006.
+        Efficient detection of network motifs.
+        IEEE/ACM transactions on computational biology and bioinformatics,
+        3(4), pp.347-359.
 
         Args:
             max_subgraphs (int, optional): If given, raise
                 :class:`MyersonBudgetExceeded` as soon as more than this many
                 connected subgraphs have been generated. Lets a caller bail out
                 to sampling on graphs whose exact cost (``|C|`` model forwards)
-                is too high, *without* first paying for the full enumeration.
+                is too high.
 
         Returns:
-            tuple(list[int], list[tuple], list[int]):
-                * the connected-subgraph bitmasks,
-                * the same subgraphs as node-label tuples (for the worth oracle),
-                * the full-graph neighbour-set bitmask ``N(S)`` of each.
+            tuple(list[int], list[tuple], list[int]): Three parallel lists,
+            one entry per connected subgraph ``S`` (index ``i`` refers to the
+            same ``S`` in all three):
+
+                * ``sub_masks``: ``S`` as an integer bitmask; bit ``k`` set means
+                  the vertex at adjacency index ``k`` is in ``S``.
+                * ``sub_tuples``: the same ``S`` as a tuple of node labels
+                  (``self.nx_graph`` node ids), passed to the worth oracle.
+                * ``neighbour_masks_of_sub``: bitmask of ``N(S)``, the vertices
+                  adjacent to ``S`` but not in it (``nbrs(S) \\ S``), used for the
+                  Skibski neighbour-set weighting.
         """
         index_to_label, _, neighbor_masks = \
             self._get_adjacency_masks(self.nx_graph)
@@ -494,18 +517,39 @@ class MyersonCalculator():
                     f"budget is {max_subgraphs}, so exact enumeration was "
                     "skipped before starting (use sampling instead).")
 
-        sub_masks: list[int] = []
+        # Traverse in a degree-descending vertex order (Skibski et al. 2014,
+        # Alg. 1, line 2). Rooting at (and forbidding) high-degree vertices first
+        # shrinks the frontier explored by later, lower-degree roots. Correctness
+        # only needs a consistent total order, so we relabel to "rank" space
+        # (rank 0 = highest degree) for the traversal and map back afterwards.
+        rank_to_index = sorted(
+            range(n), key=lambda i: (-bin(neighbor_masks[i]).count("1"), i))
+        index_to_rank = [0] * n
+        for rank, idx in enumerate(rank_to_index):
+            index_to_rank[idx] = rank
+        rank_neighbor_masks = [0] * n
+        for rank, idx in enumerate(rank_to_index):
+            m = neighbor_masks[idx]
+            remapped = 0
+            while m:
+                low = m & (-m)
+                remapped |= 1 << index_to_rank[low.bit_length() - 1]
+                m ^= low
+            rank_neighbor_masks[rank] = remapped
+
+        sub_masks_rank: list[int] = []
         for root in range(n):
-            below = (1 << root) - 1                 # all lower-index vertices
-            init_ext = neighbor_masks[root] & ~below
+            below = (1 << root) - 1                 # all lower-rank vertices
+            init_ext = rank_neighbor_masks[root] & ~below
             # `seen` = vertices that may never (re-)enter the frontier: the root,
             # all lower vertices, and everything already queued in the frontier.
             seen0 = below | (1 << root) | init_ext
             stack = [(1 << root, init_ext, seen0)]
             while stack:
                 sub, ext, seen = stack.pop()
-                sub_masks.append(sub)
-                if max_subgraphs is not None and len(sub_masks) > max_subgraphs:
+                sub_masks_rank.append(sub)
+                if max_subgraphs is not None \
+                        and len(sub_masks_rank) > max_subgraphs:
                     raise MyersonBudgetExceeded(
                         f"More than {max_subgraphs} connected subgraphs; "
                         "exact enumeration aborted (use sampling instead).")
@@ -514,30 +558,36 @@ class MyersonCalculator():
                     w = e & (-e)
                     e ^= w                          # consume w at this level
                     wi = w.bit_length() - 1
-                    new_nbrs = neighbor_masks[wi] & ~seen   # exclusive neighbours
+                    new_nbrs = rank_neighbor_masks[wi] & ~seen  # exclusive neighbors
                     # Child keeps the remaining siblings (`e`) plus w's new
-                    # exclusive neighbours; `seen` accumulates only down a branch.
+                    # exclusive neighbors; `seen` accumulates only down a branch.
                     stack.append((sub | w, e | new_nbrs, seen | new_nbrs))
 
-        def _mask_to_tuple(mask: int) -> tuple:
+        # Map each rank-space subgraph back to original-index space: `sub_masks`
+        # and `neighbour_masks_of_sub` are bit-indexed by original adjacency
+        # index (the space the caller's Myerson accumulator uses).
+        sub_masks: list[int] = []
+        sub_tuples: list[tuple] = []
+        neighbour_masks_of_sub: list[int] = []
+        for rm in sub_masks_rank:
+            orig_mask = 0
             labels = []
-            m = mask
+            m = rm
             while m:
                 low = m & (-m)
-                labels.append(index_to_label[low.bit_length() - 1])
+                idx = rank_to_index[low.bit_length() - 1]
+                orig_mask |= 1 << idx
+                labels.append(index_to_label[idx])
                 m ^= low
-            return tuple(labels)
-
-        sub_tuples = [_mask_to_tuple(m) for m in sub_masks]
-        neighbour_masks_of_sub = []
-        for m in sub_masks:
+            sub_masks.append(orig_mask)
+            sub_tuples.append(tuple(labels))
             nbr = 0
-            c = m
+            c = orig_mask
             while c:
                 low = c & (-c)
                 nbr |= neighbor_masks[low.bit_length() - 1]
                 c ^= low
-            neighbour_masks_of_sub.append(nbr & ~m)   # N(S) = nbrs \ S
+            neighbour_masks_of_sub.append(nbr & ~orig_mask)  # N(S) = nbrs \ S
         return sub_masks, sub_tuples, neighbour_masks_of_sub
 
 
@@ -559,15 +609,18 @@ class MyersonCalculator():
         """Exact Myerson values via connected-subgraph enumeration (Skibski et
         al. 2014, Algorithm 4).
 
+        Skibski, O., Michalak, T.P., Rahwan, T. and Wooldridge, M., 2014, May.
+        Algorithms for the Shapley and Myerson values in graph-restricted games.
+        In Proceedings of the 2014 international conference on Autonomous agents and
+        multi-agent systems (pp. 197-204).
+
         For every connected induced subgraph ``S`` with full-graph neighbour set
         ``N(S)`` and worth ``v(S)``::
 
             for u in S      : MV[u] += (|S|-1)! |N(S)|!   / (|S|+|N(S)|)! * v(S)
             for u in N(S)   : MV[u] -= |S|!   (|N(S)|-1)! / (|S|+|N(S)|)! * v(S)
 
-        The worth oracle ``v`` is evaluated exactly once per connected subgraph
-        — the information-theoretic minimum under the black-box (GNN) oracle —
-        and here in a single batched call, matching the existing pipeline.
+        The worth oracle ``v`` is evaluated exactly once per connected subgraph.
         Handles both scalar worths and tensor / multi-output worths (the latter
         returns a ``(n_nodes, n_tasks)`` array, like the class sampler).
 

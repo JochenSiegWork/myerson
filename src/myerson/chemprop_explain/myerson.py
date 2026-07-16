@@ -46,19 +46,24 @@ class MyersonExplainer(MyersonCalculator):
         self._warn_if_disconnected(cc)
 
     def _forward(self, batch_mol_graph: BatchMolGraph) -> torch.Tensor:
-        """Run the coalition function (MPNN) in eval mode without building an
-        autograd graph. Returns a detached CPU tensor of shape ``(B, tasks)``.
+        """Run the coalition function (MPNN) in eval mode.
+
+        Returns a detached CPU tensor of shape ``(B, tasks)``.
 
         The model's original ``training`` flag is restored afterwards so calling
         an explainer does not silently mutate the user's model.
+
+        Note: toggling ``eval``/``train`` mutates the module's mode in place and is
+        not thread-safe. Do not share the model with concurrent train/inference
+        threads while an explainer is running.
         """
         model = self.coalition_function
         was_training = model.training
         model.eval()
+        batch_mol_graph.to(model.device)
         try:
-            batch_mol_graph.to(model.device)
             with torch.inference_mode():
-                return model(batch_mol_graph).detach().cpu()
+                return model(batch_mol_graph).cpu()
         finally:
             model.train(was_training)
 
@@ -108,7 +113,7 @@ class MyersonExplainer(MyersonCalculator):
             float: Worth, the output of the coalition function for the connected
             subgraph. 
         """
-        if graph_restricted_coalition == ():
+        if not graph_restricted_coalition:
             return self._empty_worth()
         subgraph = self.subgraph_from_coalition(graph_restricted_coalition, molgraph)
         out = self._forward(BatchMolGraph([subgraph]))
@@ -124,7 +129,6 @@ class MyersonExplainer(MyersonCalculator):
         The non-empty connected components are evaluated in *batches*: many
         subgraphs are collated into a single ``BatchMolGraph`` and run through
         the MPNN in one forward pass (under ``torch.inference_mode`` + ``eval``).
-        This is dramatically faster than one forward pass per coalition.
 
         Args:
             graph_restricted_coalitions (list): Set of connected components as
@@ -132,12 +136,16 @@ class MyersonExplainer(MyersonCalculator):
             batch_size (int, optional): Maximum number of subgraphs per forward
                 pass. On GPU, throughput rises with batch size up to ~4096 (then
                 plateaus); on CPU it is essentially flat past a few hundred. The
-                subgraphs are small (≤ molecule size), so 4096 is well within
+                subgraphs are small (<= molecule size), so 4096 is well within
                 memory. Defaults to 4096.
-            max_atoms_per_forward (int | None, optional): If given, chunk by the
-                total number of subgraph atoms rather than only by number of
-                subgraphs. This gives tighter GPU-memory control for exact
-                explanations where connected subgraph sizes vary widely.
+            max_atoms_per_forward (int | None, optional): If given, additionally
+                chunk by the total number of subgraph atoms rather than only by
+                number of subgraphs. This gives tighter GPU-memory control for
+                explanations where connected subgraph sizes vary widely. It is
+                applied *together* with ``batch_size``, not as an alternative: a
+                chunk is flushed as soon as either cap is reached, so
+                ``batch_size`` still acts as a hard upper bound on the number of
+                subgraphs per forward pass.
 
         Returns:
             dict: Dictionary mapping each connected component to its worth.
@@ -148,7 +156,7 @@ class MyersonExplainer(MyersonCalculator):
         # Separate the empty coalition (no forward pass needed).
         non_empty = []
         for coalition in graph_restricted_coalitions:
-            if coalition == ():
+            if not coalition:
                 graph_restricted_coalitions_to_worth[()] = self._empty_worth()
             else:
                 non_empty.append(coalition)
@@ -174,9 +182,9 @@ class MyersonExplainer(MyersonCalculator):
                           desc="Calculating worth of graph restricted coalitions",
                           disable=self.disable_tqdm):
             out = self._forward(self._batch_mol_graph_from_coalitions(chunk))
-            for i, coalition in enumerate(chunk):
-                graph_restricted_coalitions_to_worth[coalition] = \
-                    self._postprocess_worth(out[i])
+            for coalition, worth in zip(chunk, out, strict=True):
+                graph_restricted_coalitions_to_worth[
+                    coalition] = self._postprocess_worth(worth)
         return graph_restricted_coalitions_to_worth
 
     def _batch_mol_graph_from_coalitions(self, coalitions: list) -> BatchMolGraph:
@@ -458,10 +466,7 @@ class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplai
         on the already-prepared bitmask worth table (``self._worth_by_mask`` etc.).
 
         Overrides :meth:`MyersonSampler._sampled_myerson_values_from_prepared`
-        so the per-task worth *vectors* are accumulated instead of scalars. Kept
-        separate from :meth:`sample_all_myerson_values` so a cross-molecule
-        batched pipeline can fill the worth table externally and then call this
-        (see :func:`explain_batch` with ``classification=True``).
+        so the per-task worth *vectors* are accumulated instead of scalars.
         """
         self.log.info(f"Calculating sampled Myerson values.")
         # Per-task worth vectors keyed by integer bitmask (see base class).
