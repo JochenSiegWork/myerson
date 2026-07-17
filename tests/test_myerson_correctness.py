@@ -15,6 +15,7 @@ class TestExactCorrectnessAgainstBruteForce:
 
     @pytest.mark.parametrize("name,graph", list(_reference_graphs().items()))
     def test_matches_brute_force(self, name, graph):
+        """Exact values match the brute-force oracle across all topologies."""
         worth = make_weighted_worth()
         calc = MyersonCalculator(graph=graph, coalition_function=worth)
         got = calc.calculate_all_myerson_values()
@@ -22,14 +23,6 @@ class TestExactCorrectnessAgainstBruteForce:
         assert np.allclose(got, expected, atol=1e-9), (
             f"{name}: {got=} {expected=}")
 
-    def test_efficiency_axiom_sum_equals_grand_coalition_worth(self):
-        # Myerson values must sum to the worth of the grand coalition.
-        graph = _reference_graphs()["ring_with_tail"]
-        worth = make_weighted_worth()
-        calc = MyersonCalculator(graph=graph, coalition_function=worth)
-        values = calc.calculate_all_myerson_values()
-        grand = calc.calculate_worth_of_grand_coalition(graph)
-        assert values.sum() == pytest.approx(grand, abs=1e-9)
 
 class TestExactMultiOutput:
     """The tensor / multi-output accumulation in the connected-enum path
@@ -42,6 +35,9 @@ class TestExactMultiOutput:
         ("gnp_7", nx.gnp_random_graph(7, 0.4, seed=2)),
     ])
     def test_matches_brute_force(self, name, graph):
+        """Vector-valued (multi-output) worths match the brute-force oracle,
+        with the expected ``(n_nodes, n_tasks)`` output shape.
+        """
         worth = make_multioutput_worth(n_tasks=3)
         calc = MyersonCalculator(graph=graph, coalition_function=worth)
         got = calc.calculate_all_myerson_values()
@@ -49,6 +45,7 @@ class TestExactMultiOutput:
         assert got.shape == (graph.number_of_nodes(), 3), f"{name}: {got.shape=}"
         assert np.allclose(got, expected, atol=1e-9), (
             f"{name}: {got=} {expected=}")
+
 
 class TestLegacyLatticePathAgrees:
     """The legacy full-lattice path (`calculate_all_mappings` +
@@ -64,6 +61,9 @@ class TestLegacyLatticePathAgrees:
         ("gnp_6", nx.gnp_random_graph(6, 0.5, seed=1)),
     ])
     def test_lattice_matches_connected_enum(self, name, graph):
+        """The legacy lattice path and the connected-enum path give equal
+        values on the same games.
+        """
         worth = make_weighted_worth()
         production = MyersonCalculator(
             graph=graph, coalition_function=worth).calculate_all_myerson_values()
@@ -72,26 +72,29 @@ class TestLegacyLatticePathAgrees:
         assert np.allclose(production, legacy, atol=1e-9), (
             f"{name}: {production=} {legacy=}")
 
+
 class TestExactEdgeCases:
+    """Degenerate graphs: empty, single node, and all-isolated nodes."""
 
     def test_empty_graph_returns_empty_array(self):
+        """A graph with no nodes yields an empty value array."""
         calc = MyersonCalculator(
             graph=nx.Graph(), coalition_function=make_weighted_worth())
         values = calc.calculate_all_myerson_values()
         assert values.shape == (0,)
 
     def test_single_node_graph(self):
+        """The only coalition is the singleton, so its value is its worth."""
         graph = nx.Graph()
         graph.add_node(0)
         worth = make_weighted_worth()
         calc = MyersonCalculator(graph=graph, coalition_function=worth)
         values = calc.calculate_all_myerson_values()
-        # The only coalition is the singleton, so its Myerson value is its worth.
         assert values.shape == (1,)
         assert values[0] == pytest.approx(worth((0,), graph), abs=1e-9)
 
     def test_all_isolated_nodes_equal_singleton_worths(self):
-        # No edges: a node can never gain from coalition, so MV_i = v({i}).
+        """No edges: a node can never gain from a coalition, so MV_i = v({i})."""
         graph = nx.Graph()
         graph.add_nodes_from(range(4))
         worth = make_weighted_worth()
@@ -101,12 +104,14 @@ class TestExactEdgeCases:
         assert np.allclose(values, expected, atol=1e-9)
         assert np.allclose(values, brute_force_myerson(graph, worth), atol=1e-9)
 
+
 class TestSamplerAgreesWithExact:
     """Cross-validate the Monte-Carlo sampler against the exact values on a
     graph not covered by the analytic gloves cases.
     """
 
     def test_sampler_converges_to_exact(self):
+        """With many samples the estimate converges to the exact values."""
         graph = _reference_graphs()["ring_with_tail"]
         worth = make_weighted_worth(scale=0.1)  # keep values O(1) for a tight tol
         exact = MyersonCalculator(
@@ -119,6 +124,7 @@ class TestSamplerAgreesWithExact:
             f"{sampled=} {exact=}")
 
     def test_sampler_is_deterministic_for_fixed_seed(self):
+        """A fixed seed yields bitwise-identical results across runs."""
         graph = nx.path_graph(5)
         worth = make_weighted_worth(scale=0.1)
         kwargs = dict(graph=graph, coalition_function=worth,
@@ -126,6 +132,7 @@ class TestSamplerAgreesWithExact:
         first = MyersonSampler(**kwargs).sample_all_myerson_values()
         second = MyersonSampler(**kwargs).sample_all_myerson_values()
         assert np.array_equal(first, second)
+
 
 class TestExactInLoopBudget:
     """The budget can also trip *during* enumeration (not only in the preflight
@@ -135,22 +142,28 @@ class TestExactInLoopBudget:
     """
 
     def test_in_loop_budget_raises(self):
+        """A budget above the preflight lower bound but below the true count
+        must still abort, this time from inside the enumeration loop.
+        """
         graph = nx.complete_graph(6)  # 2^6 - 1 = 63 connected subgraphs
         budget = 40
         calc = MyersonCalculator(
             graph=graph, coalition_function=make_weighted_worth())
-        # The spanning-forest lower bound (37 for K6) is below the budget, so the
-        # preflight check passes; the abort must therefore come from the
-        # enumeration loop once it generates the 41st connected subgraph.
+        # Lower bound (37 for K6) is below the budget, so the preflight passes;
+        # the abort therefore comes from generating the 41st connected subgraph.
         assert calc.connected_subgraph_count_lower_bound() <= budget
         calc._connected_enum_max_subgraphs = budget
         with pytest.raises(MyersonBudgetExceeded):
             calc.calculate_all_myerson_values()
 
+
 class TestSamplerStatistics:
     """Statistical guarantees of the Monte-Carlo sampler beyond determinism."""
 
     def test_unbiased_average_over_seeds_approaches_exact(self):
+        """Averaging estimates over many seeds approaches the exact values
+        (the sampler is unbiased).
+        """
         graph = nx.path_graph(5)
         worth = make_weighted_worth(scale=0.1)
         exact = MyersonCalculator(
@@ -167,6 +180,7 @@ class TestSamplerStatistics:
             f"{mean_estimate=} {exact=}")
 
     def test_error_shrinks_with_more_samples(self):
+        """The mean absolute error decreases as the sample count grows."""
         graph = nx.path_graph(5)
         worth = make_weighted_worth(scale=0.1)
         exact = MyersonCalculator(

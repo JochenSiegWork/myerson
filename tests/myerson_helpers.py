@@ -236,6 +236,15 @@ def randic_chi_worth(coalition, nx_graph):
         total += 1.0 / (sub.degree(u) * sub.degree(v)) ** 0.5
     return total
 
+def edge_count_worth(coalition, nx_graph):
+    """Number of edges in the induced subgraph, ``v(S) = |E(S)|``.
+
+    Decomposes into one 2-player unanimity game per edge, so fairness splits
+    each edge 50/50 and the Myerson value has the exact closed form
+    ``MV_i = deg(i) / 2``.
+    """
+    return float(nx_graph.subgraph(coalition).number_of_edges())
+
 _TOPOLOGICAL_DESCRIPTORS = {
     "zagreb_m1": zagreb_m1_worth,
     "wiener": wiener_index_worth,

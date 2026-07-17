@@ -7,10 +7,10 @@ from .myerson_helpers import gloves_game_coalition_function
 
 
 class TestMyersonCalculator:
+    """Exact Myerson values via the connected-subgraph enumeration path."""
 
-    # test calculate_calculate_all_myerson_values
     def test_gloves_game_case0(self):
-        # testing the L--R--R graph
+        """Gloves game on the connected ``L--R--R`` path."""
         graph = nx.Graph()
         graph.add_edges_from([(1, 2), (2, 3)])
         graph.add_node(1, glove="left")
@@ -25,7 +25,7 @@ class TestMyersonCalculator:
             assert my == pytest.approx(sol, abs=1e-5), f"{my_values=}, {solution=}"
 
     def test_gloves_game_case1(self):
-        # testing the L--R--R  L graph (disconnected graph)
+        """Gloves game on the disconnected ``L--R--R  L`` graph."""
         graph = nx.Graph()
         graph.add_edges_from([(1, 2), (2, 3)])
         graph.add_node(1, glove="left")
@@ -41,7 +41,7 @@ class TestMyersonCalculator:
             assert my == pytest.approx(sol, abs=1e-5), f"{my_values=}, {solution=}"
 
     def test_gloves_game_case2(self):
-        # testing the complete LRR graph
+        """Gloves game on the complete ``L-R-R`` graph (triangle)."""
         graph = nx.Graph()
         graph.add_edges_from([(1, 2), (2, 3), (1, 3)])
         graph.add_node(1, glove="left")
@@ -55,6 +55,7 @@ class TestMyersonCalculator:
             assert my == pytest.approx(sol, abs=1e-5), f"{my_values=}, {solution=}"
 
     def test_connected_subgraph_count_lower_bound_is_exact_for_trees(self):
+        """The spanning-forest lower bound equals the true count for trees."""
         path = nx.path_graph(5)
         calc = MyersonCalculator(path, lambda coalition, graph: 0.0)
         # A path on n nodes has n * (n + 1) / 2 connected induced subgraphs.
@@ -67,6 +68,7 @@ class TestMyersonCalculator:
         assert calc.connected_subgraph_count_lower_bound() == 2**4 + 4
 
     def test_budget_preflight_skips_doomed_enumeration_before_worth_calls(self):
+        """The preflight budget check aborts before any worth is evaluated."""
         graph = nx.path_graph(20)
         calls = 0
 
@@ -82,11 +84,12 @@ class TestMyersonCalculator:
             calc.calculate_all_myerson_values()
         assert calls == 0
 
-class TestMyersonSampler:
 
-    # test calculate_calculate_all_myerson_values
+class TestMyersonSampler:
+    """Monte-Carlo approximation of the Myerson values (gloves game)."""
+
     def test_gloves_game_case0(self):
-        # testing the L--R--R graph
+        """Gloves game on the connected ``L--R--R`` path."""
         graph = nx.Graph()
         graph.add_edges_from([(1, 2), (2, 3)])
         graph.add_node(1, glove="left")
@@ -104,7 +107,7 @@ class TestMyersonSampler:
             assert my == pytest.approx(sol, abs=1e-1), f"{my_values=}, {solution=}"
 
     def test_gloves_game_case1(self):
-        # testing the L--R--R  L graph (disconnected graph)
+        """Gloves game on the disconnected ``L--R--R  L`` graph."""
         graph = nx.Graph()
         graph.add_edges_from([(1, 2), (2, 3)])
         graph.add_node(1, glove="left")
@@ -123,7 +126,7 @@ class TestMyersonSampler:
             assert my == pytest.approx(sol, abs=1e-1), f"{my_values=}, {solution=}"
 
     def test_gloves_game_case2(self):
-        # testing the complete LRR graph
+        """Gloves game on the complete ``L-R-R`` graph (triangle)."""
         graph = nx.Graph()
         graph.add_edges_from([(1, 2), (2, 3), (1, 3)])
         graph.add_node(1, glove="left")
