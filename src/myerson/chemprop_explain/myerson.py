@@ -489,37 +489,3 @@ class MyersonSamplingClassExplainer(MyersonSamplingExplainer, MyersonClassExplai
         log_string = "".join([f"\t{node}: {val}\n" for node, val in zip(self.grand_coalition, my_values)])
         self.log.info(f"Sampled Myerson Values:\n{log_string}")
         return my_values
-
-def explain(molgraph: MolGraph,
-            model: MPNN,
-            sample_if_more_nodes_than: int=20,
-            verbose: bool=False) -> dict:
-    """A function to quickly get started with explaining GNN predictions using Myerson values.
-
-    Args:
-        molgraph (MolGraph): The chemprop MolGraph instance.
-        model (MPNN): The message passing neural network.
-        sample_if_more_nodes_than (int, optional): Barrier for when to start
-            sampling instead of exact calculations. Defaults to 20.
-        verbose (bool, optional): Whether to log information to the output and
-            show progress bars. Defaults to False.
-
-    Returns:
-        dict: The (sampled) Myerson values.
-    """
-
-    if verbose:
-        logging.basicConfig(level=logging.INFO, format='[%(asctime)s - %(levelname)s] %(message)s', force=True)
-        disable_tqdm=False
-    else:
-        disable_tqdm=True
-
-    node_count = molgraph.V.shape[0]
-    if node_count > sample_if_more_nodes_than:
-        logging.info("Sampling Myerson values.")
-        sampler = MyersonSamplingExplainer(molgraph, model, disable_tqdm=disable_tqdm)
-        return sampler.sample_all_myerson_values()
-    else:
-        logging.info("Calculating exact Myerson values.")
-        explainer = MyersonExplainer(molgraph, model, disable_tqdm=disable_tqdm)
-        return explainer.calculate_all_myerson_values()
